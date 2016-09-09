@@ -513,7 +513,7 @@ static bool errseen;
 
 /* True if output from the current input file has been suppressed
  because an output line had an encoding error.  */
-static bool encoding_error_output;
+/* static bool encoding_error_output; */
 
 enum directories_type
 {
@@ -834,9 +834,9 @@ static off_t bufoffset;		/* Read offset; defined on regular files.  */
 static off_t after_last_match;	/* Pointer after last matching line that
                                  would have been output if we were
                                  outputting characters. */
-static bool skip_nuls;		/* Skip '\0' in data.  */
+/*static bool skip_nuls;		 Skip '\0' in data.  */
 static bool skip_empty_lines;	/* Skip empty lines in data.  */
-static bool seek_data_failed;	/* lseek with SEEK_DATA failed.  */
+/*static bool seek_data_failed;	 lseek with SEEK_DATA failed.  */
 /*static uintmax_t totalnl;	 Total newline count before lastnl. */
 
 /* Return VAL aligned to the next multiple of ALIGNMENT.  VAL can be
@@ -901,6 +901,7 @@ static bool
 fillbuf (size_t save, struct stat const *st, struct grep_info * info)
 {
     uintmax_t *totalnl_local = &(info->totalnl);
+    bool *seek_data_failed_local = &(info->seek_data_failed);
     size_t fillsize;
     bool cc = true;
     char *readbuf;
@@ -977,11 +978,11 @@ fillbuf (size_t save, struct stat const *st, struct grep_info * info)
         }
         bufoffset += fillsize;
         
-        if (((fillsize == 0) | !skip_nuls) || !all_zeros (readbuf, fillsize))
+        if (((fillsize == 0) | !info->skip_nuls) || !all_zeros (readbuf, fillsize))
             break;
         *totalnl_local = add_count (*totalnl_local, fillsize);
         
-        if (SEEK_DATA != SEEK_SET && !seek_data_failed)
+        if (SEEK_DATA != SEEK_SET && !*seek_data_failed_local)
         {
             /* Solaris SEEK_DATA fails with errno == ENXIO in a hole at EOF.  */
             off_t data_start = lseek (bufdesc, bufoffset, SEEK_DATA);
@@ -990,7 +991,7 @@ fillbuf (size_t save, struct stat const *st, struct grep_info * info)
                 data_start = lseek (bufdesc, 0, SEEK_END);
             
             if (data_start < 0)
-                seek_data_failed = true;
+                *seek_data_failed_local = true;
             else
             {
                 *totalnl_local = add_count (*totalnl_local, data_start - bufoffset);
@@ -1054,8 +1055,8 @@ static char const *lastnl;	/* Pointer after last newline counted. */
  NULL if no character has been output
  or if it's conceptually before bufbeg. */
 static intmax_t outleft;	/* Maximum number of lines to be output.  */
-static intmax_t pending;	/* Pending lines of output.
-                             Always kept 0 if out_quiet is true.  */
+/*static intmax_t pending;	 Pending lines of output.
+ Always kept 0 if out_quiet is true.  */
 static bool done_on_match;	/* Stop scanning file on first match.  */
 static bool exit_on_match;	/* Exit on first match.  */
 
@@ -1136,6 +1137,9 @@ static bool
 print_line_head (char *beg, size_t len, char const *lim, char sep, struct grep_info * info)
 {
     uintmax_t *totalnl_local = &(info->totalnl);
+    bool *encoding_error_output_local = &(info->encoding_error_output);
+    bool *done_on_match_local = &(info->done_on_match);
+    
     bool encoding_errors = false;
     if (binary_files != TEXT_BINARY_FILES)
     {
@@ -1145,7 +1149,7 @@ print_line_head (char *beg, size_t len, char const *lim, char sep, struct grep_i
     }
     if (encoding_errors)
     {
-        encoding_error_output = done_on_match = out_quiet = true;
+        *encoding_error_output_local = *done_on_match_local = out_quiet = true;
         return false;
     }
     
@@ -1176,7 +1180,7 @@ print_line_head (char *beg, size_t len, char const *lim, char sep, struct grep_i
     
     if (out_byte)
     {
-        uintmax_t pos = add_count (totalcc, beg - bufbeg);
+        uintmax_t pos = add_count (info->totalcc, beg - bufbeg);
         pos = dossified_pos (pos);
         if (pending_sep)
             print_sep (sep);
@@ -1349,22 +1353,23 @@ prline (char *beg, char *lim, char sep, struct grep_info * info)
 static void
 prpending (char const *lim, struct grep_info * info)
 {
+    intmax_t *pending_local = &(info->pending);
     intmax_t outleft_local = info->outleft;
     char ** lastout_local = &(info->lastout);
     if (!(*lastout_local))
         *lastout_local = bufbeg;
-    while (pending > 0 && *lastout_local < lim)
+    while (*pending_local > 0 && *lastout_local < lim)
     {
         char *nl = memchr (*lastout_local, eolbyte, lim - *lastout_local);
         size_t match_size;
-        --pending;
+        --(*pending_local);
         if (outleft_local
             || ((execute (*lastout_local, nl + 1 - *lastout_local,
                           &match_size, NULL) == (size_t) -1)
                 == !out_invert))
             prline (*lastout_local, nl + 1, SEP_CHAR_REJECTED, info);
         else
-            pending = 0;
+            *pending_local = 0;
     }
 }
 
@@ -1374,10 +1379,13 @@ prtext (char *beg, char *lim, struct grep_info * info)
 {
     intmax_t *outleft_local =&(info->outleft);
     char ** lastout_local = &(info->lastout);
+    off_t *after_last_match_local = &(info->after_last_match);
+    intmax_t *pending_local = &(info->pending);
+    
     static bool used;	/* Avoid printing SEP_STR_GROUP before any output.  */
     char eol = eolbyte;
     
-    if (!out_quiet && pending > 0)
+    if (!out_quiet && *pending_local > 0)
         prpending (beg, info);
     
     char *p = beg;
@@ -1435,8 +1443,8 @@ prtext (char *beg, char *lim, struct grep_info * info)
         p = lim;
     }
     
-    after_last_match = bufoffset - (buflim - p);
-    pending = out_quiet ? 0 : MAX (0, out_after);
+    *after_last_match_local = bufoffset - (buflim - p);
+    *pending_local = out_quiet ? 0 : MAX (0, out_after);
     used = true;
     *outleft_local -= n;
 }
@@ -1470,6 +1478,7 @@ grepbuf (char *beg, char const *lim, struct grep_info * info)
 {
     intmax_t outleft0 = info->outleft;
     char *endp;
+    bool *done_on_match_local = &(info->done_on_match);
     
     for (char *p = beg; p < lim; p = endp)
     {
@@ -1492,7 +1501,7 @@ grepbuf (char *beg, char const *lim, struct grep_info * info)
             char *prbeg = out_invert ? p : b;
             char *prend = out_invert ? b : endp;
             prtext (prbeg, prend, info);
-            if (!(info->outleft) || done_on_match)
+            if (!(info->outleft) || *done_on_match_local)
             {
                 if (exit_on_match)
                     exit (errseen ? exit_failure : EXIT_SUCCESS);
@@ -1515,7 +1524,7 @@ grep (int fd, struct stat const *st, struct grep_info * info)
     char *lim;
     char eol = eolbyte;
     char nul_zapper = '\0';
-    bool done_on_match_0 = done_on_match;
+    bool done_on_match_0 = info->done_on_match;
     bool out_quiet_0 = out_quiet;
     
     /* The value of NLINES when nulls were first deduced in the input;
@@ -1527,16 +1536,16 @@ grep (int fd, struct stat const *st, struct grep_info * info)
         return 0;
     info -> bufbeg = bufbeg;
     info -> buflim = buflim;
+    info -> skip_nuls = skip_empty_lines && !eol;
     //  totalcc = 0;
     //  lastout = 0;
     //  totalnl = 0;
-    //  outleft = max_count;
-    after_last_match = 0;
-    pending = 0;
-    skip_nuls = skip_empty_lines && !eol;
-    info -> skip_nuls = skip_empty_lines && !eol;
-    encoding_error_output = false;
-    seek_data_failed = false;
+    outleft = max_count; /* global outleft might still be used by grepdesc afterwards */
+    after_last_match = 0; /* global after_last_match might still be used by grepdesc afterwards */
+    //    pending = 0;
+    //    skip_nuls = skip_empty_lines && !eol;
+    //    encoding_error_output = false;
+    //    seek_data_failed = false;
     
     nlines = 0;
     residue = 0;
@@ -1557,10 +1566,10 @@ grep (int fd, struct stat const *st, struct grep_info * info)
             if (binary_files == WITHOUT_MATCH_BINARY_FILES)
                 return 0;
             if (!count_matches)
-                done_on_match = out_quiet = true;
+                info->done_on_match = out_quiet = true;
             nlines_first_null = nlines;
             nul_zapper = eol;
-            skip_nuls = skip_empty_lines;
+            info->skip_nuls = skip_empty_lines;
         }
         
         lastnl = bufbeg;
@@ -1593,10 +1602,10 @@ grep (int fd, struct stat const *st, struct grep_info * info)
         {
             if (info->outleft)
                 nlines += grepbuf (beg, lim, info);
-            if (pending)
+            if (info->pending)
                 prpending (lim, info);
-            if ((!info->outleft && !pending)
-                || (done_on_match && MAX (0, nlines_first_null) < nlines))
+            if ((!info->outleft && !info->pending)
+                || (info->done_on_match && MAX (0, nlines_first_null) < nlines))
                 goto finish_grep;
         }
         
@@ -1620,7 +1629,7 @@ grep (int fd, struct stat const *st, struct grep_info * info)
         /* Handle some details and read more data to scan.  */
         save = residue + lim - beg;
         if (out_byte)
-            totalcc = add_count (totalcc, buflim - bufbeg - save);
+            info->totalcc = add_count (info->totalcc, buflim - bufbeg - save);
         if (out_line)
             nlscan (beg,info);
         if (! fillbuf (save, st, info))
@@ -1634,14 +1643,14 @@ grep (int fd, struct stat const *st, struct grep_info * info)
         *buflim++ = eol;
         if (info->outleft)
             nlines += grepbuf (bufbeg + save - residue, buflim, info);
-        if (pending)
+        if (info->pending)
             prpending (buflim, info);
     }
     
 finish_grep:
-    done_on_match = done_on_match_0;
+    info->done_on_match = done_on_match_0;
     out_quiet = out_quiet_0;
-    if (!out_quiet && (encoding_error_output
+    if (!out_quiet && (info->encoding_error_output
                        || (0 <= nlines_first_null && nlines_first_null < nlines)))
     {
         printf_errno (_("Binary file %s matches\n"), filename);
