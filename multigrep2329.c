@@ -1855,8 +1855,20 @@ grepdesc (int desc, bool command_line)
         if (!fts)
             xalloc_die ();
         
-        while ((ent = fts_read (fts)))
-            status &= grepdirent (fts, ent, command_line);
+        if(parallel){
+            bool *status_array = (bool *) malloc(sizeof(bool) * numThreads);
+            while ((ent = fts_read (fts))){
+                status &= grepdirent (fts, ent, command_line);
+            }
+            for(int i=0;i<numThreads;++i){
+                status &= status_array[i];
+            }
+            free(status_array);
+        }
+        else{
+            while ((ent = fts_read (fts)))
+                status &= grepdirent (fts, ent, command_line);
+        }
         
         if (errno)
             suppressible_error (filename, errno);
