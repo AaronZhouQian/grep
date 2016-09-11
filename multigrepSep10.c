@@ -1961,7 +1961,7 @@ grepdesc (int desc, bool command_line)
             running_index = (running_index + 1) % num_threads;
         }
         arg->thread_id = running_index;
-//        struct thread_routine_arg **arg_pt = &arg;
+        //        struct thread_routine_arg **arg_pt = &arg;
         pthread_create(&threads[running_index], NULL, grep_thread_routine, (void *) arg);
         running_index = (running_index + 1) % num_threads;
         return true;
