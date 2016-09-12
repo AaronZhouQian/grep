@@ -577,7 +577,8 @@ struct thread_routine_arg{
 
 static bool *status_array;  /* return status for each thread */
 static pthread_t *threads;
-static pthread_mutex_t *fts_lock;
+static pthread_mutex_t fts_lock;
+static pthread_mutex_t grep_lock;
 static struct thread_routine_arg *thread_routine_arg_array;
 static struct grep_info *grep_info_array;
 static bool traversal_done;
@@ -2276,7 +2277,7 @@ grep_mthread (int fd, struct stat const *st, struct grep_info *info)
       lim = beg - residue;
     beg -= residue;
     residue = info->buflim - lim;
-    
+    pthread_mutex_lock(&grep_lock);
     if (beg < lim)
     {
       if (info->outleft)
@@ -2327,6 +2328,7 @@ grep_mthread (int fd, struct stat const *st, struct grep_info *info)
   }
   
 finish_grep:
+  pthread_mutex_unlock(&grep_lock);
   info->done_on_match = done_on_match_0;
   info->out_quiet = out_quiet_0;
   if (!info->out_quiet && (info->encoding_error_output
@@ -2434,15 +2436,15 @@ thread_routine(void *arg){
   while(true)
   {
     /* wait until the fts_lock becomes available */
-    if(pthread_mutex_trylock (fts_lock) != 0) continue;
+    pthread_mutex_lock(&fts_lock);
     if(traversal_done){
-      pthread_mutex_unlock (fts_lock);
+      pthread_mutex_unlock (&fts_lock);
       break;
     }
     FTSENT *ent;
     if(!(ent = fts_read (fts_global))){
       traversal_done = true;
-      pthread_mutex_unlock (fts_lock);
+      pthread_mutex_unlock (&fts_lock);
       return NULL;
     }
     intmax_t thread_id = ((struct thread_routine_arg *)arg)->thread_id;
@@ -2453,7 +2455,7 @@ thread_routine(void *arg){
     {
       if (directories == RECURSE_DIRECTORIES && ((struct thread_routine_arg *)arg)->command_line_local)
         grep_info_array[thread_id].out_file &= ~ (2 * !no_filenames);
-      pthread_mutex_unlock (fts_lock);
+      pthread_mutex_unlock (&fts_lock);
       continue;
     }
     
@@ -2463,7 +2465,7 @@ thread_routine(void *arg){
                           || ent->fts_info == FTS_DNR)))
     {
       fts_set (fts_global, ent, FTS_SKIP);
-      pthread_mutex_unlock (fts_lock);
+      pthread_mutex_unlock (&fts_lock);
       continue;
     }
     
@@ -2480,7 +2482,7 @@ thread_routine(void *arg){
         if (directories == RECURSE_DIRECTORIES)
         {
           grep_info_array[thread_id].out_file |= 2 * !no_filenames;
-          pthread_mutex_unlock (fts_lock);
+          pthread_mutex_unlock (&fts_lock);
           continue;
         }
         fts_set (fts_global, ent, FTS_SKIP);
@@ -2490,14 +2492,14 @@ thread_routine(void *arg){
         if (!suppress_errors)
           error (0, 0, _("warning: %s: %s"), ((struct thread_routine_arg *)arg)->filename_local,
                  _("recursive directory loop"));
-        pthread_mutex_unlock (fts_lock);
+        pthread_mutex_unlock (&fts_lock);
         continue;
         
       case FTS_DNR:
       case FTS_ERR:
       case FTS_NS:
         suppressible_error (((struct thread_routine_arg *)arg)->filename_local, ent->fts_errno);
-        pthread_mutex_unlock (fts_lock);
+        pthread_mutex_unlock (&fts_lock);
         continue;
         
       case FTS_DEFAULT:
@@ -2515,13 +2517,13 @@ thread_routine(void *arg){
             if (fstatat (fts_global->fts_cwd_fd, ent->fts_accpath, &st1, flag) != 0)
             {
               suppressible_error (((struct thread_routine_arg *)arg)->filename_local, errno);
-              pthread_mutex_unlock (fts_lock);
+              pthread_mutex_unlock (&fts_lock);
               continue;
             }
             st = &st1;
           }
           if (is_device_mode (st->st_mode)){
-            pthread_mutex_unlock (fts_lock);
+            pthread_mutex_unlock (&fts_lock);
             continue;
           }
         }
@@ -2533,16 +2535,16 @@ thread_routine(void *arg){
         
       case FTS_SL:
       case FTS_W:
-        pthread_mutex_unlock (fts_lock);
+        pthread_mutex_unlock (&fts_lock);
         continue;
         
       default:
-        pthread_mutex_unlock (fts_lock);
+        pthread_mutex_unlock (&fts_lock);
         abort ();
     }
     int dirdesc = fts_global->fts_cwd_fd;
     char const *accpath = ent->fts_accpath;
-    pthread_mutex_unlock (fts_lock);
+    pthread_mutex_unlock (&fts_lock);
     bool local_status =
     grepfile_mthread (dirdesc, accpath, follow,
                       ((struct thread_routine_arg *)arg)->command_line_local, thread_id);
@@ -2635,17 +2637,18 @@ static bool grepdesc_traversal_mthread (int desc, bool command_line){
   if (!fts_global)
     xalloc_die ();
   
-  fts_lock = (pthread_mutex_t *) malloc (sizeof (pthread_mutex_t));
   status_array = (bool *) malloc (num_threads * sizeof (bool));
   threads = (pthread_t *) malloc (num_threads * sizeof (pthread_t));
   thread_routine_arg_array = (struct thread_routine_arg *)
   malloc (num_threads * sizeof (struct thread_routine_arg));
   grep_info_array = (struct grep_info *)
   malloc (num_threads * sizeof (struct grep_info));
-  for(int i=0; i<num_threads; ++i){
-    initialize_grep_info(grep_info_array+i);
+  for(int i=0; i<num_threads; ++i)
+  {
+    initialize_grep_info (grep_info_array+i);
   }
-  pthread_mutex_init (fts_lock, NULL);
+  pthread_mutex_init (&grep_lock, NULL);
+  pthread_mutex_init (&fts_lock, NULL);
   traversal_done = false;
   for (intmax_t i=0; i<num_threads; ++i){
     status_array[i] = true;
@@ -2655,13 +2658,13 @@ static bool grepdesc_traversal_mthread (int desc, bool command_line){
     pthread_create (&threads[i], NULL, thread_routine,
                     (void *) &thread_routine_arg_array[i]);
   }
-  for(intmax_t i=0; i<num_threads; ++i){
+  for (intmax_t i=0; i<num_threads; ++i)
+  {
     pthread_join (threads[i], NULL);
     status &= status_array[i];
   }
   free (threads);
   free (status_array);
-  free (fts_lock);
   free (grep_info_array);
   free (thread_routine_arg_array);
   
@@ -2705,8 +2708,9 @@ grepdesc (int desc, bool command_line)
   
   if (desc != STDIN_FILENO
       && directories == RECURSE_DIRECTORIES && S_ISDIR (st.st_mode)){
-    if(parallel) return grepdesc_traversal_mthread (desc, command_line);
-    else{
+    if (parallel) return grepdesc_traversal_mthread (desc, command_line);
+    else
+    {
       /* Traverse the directory starting with its full name, because
        unfortunately fts provides no way to traverse the directory
        starting from its file descriptor.  */
