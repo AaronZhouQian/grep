@@ -566,6 +566,7 @@ struct grep_info{
   uintmax_t totalnl;
   int out_file;
   off_t bufoffset;
+  intmax_t thread_id;
 };
 
 struct thread_routine_arg{
@@ -579,6 +580,7 @@ static pthread_t *threads;
 static pthread_mutex_t *fts_lock;
 static struct thread_routine_arg *thread_routine_arg_array;
 static struct grep_info *grep_info_array;
+static bool traversal_done;
 
 static bool grepfile (int, char const *, bool, bool);
 static bool grepfile_mthread (int, char const *, bool, bool, intmax_t);
@@ -1099,8 +1101,6 @@ fillbuf (size_t save, struct stat const *st)
 static bool
 fillbuf_mthread (size_t save, struct stat const *st, struct grep_info *info)
 {
-  uintmax_t *totalnl_local = &(info->totalnl);
-  bool *seek_data_failed_local = &(info->seek_data_failed);
   size_t fillsize;
   bool cc = true;
   char *readbuf;
@@ -1179,9 +1179,9 @@ fillbuf_mthread (size_t save, struct stat const *st, struct grep_info *info)
     
     if (((fillsize == 0) | !info->skip_nuls) || !all_zeros (readbuf, fillsize))
       break;
-    *totalnl_local = add_count (*totalnl_local, fillsize);
+    info->totalnl = add_count (info->totalnl, fillsize);
     
-    if (SEEK_DATA != SEEK_SET && !*seek_data_failed_local)
+    if (SEEK_DATA != SEEK_SET && !info->seek_data_failed)
     {
       /* Solaris SEEK_DATA fails with errno == ENXIO in a hole at EOF.  */
       off_t data_start = lseek (bufdesc, info->bufoffset, SEEK_DATA);
@@ -1190,10 +1190,10 @@ fillbuf_mthread (size_t save, struct stat const *st, struct grep_info *info)
         data_start = lseek (bufdesc, 0, SEEK_END);
       
       if (data_start < 0)
-        *seek_data_failed_local = true;
+        info->seek_data_failed = true;
       else
       {
-        *totalnl_local = add_count (*totalnl_local, data_start - info->bufoffset);
+        info->totalnl = add_count (info->totalnl, data_start - info->bufoffset);
         info->bufoffset = data_start;
       }
     }
@@ -1282,7 +1282,6 @@ nlscan (char const *lim)
 static void
 nlscan_mthread (char const *lim, struct grep_info *info)
 {
-  uintmax_t *totalnl_local = &(info->totalnl);
   size_t newlines = 0;
   char const *beg;
   for (beg = info->lastnl; beg < lim; beg++)
@@ -1292,7 +1291,7 @@ nlscan_mthread (char const *lim, struct grep_info *info)
       break;
     newlines++;
   }
-  *totalnl_local = add_count (*totalnl_local, newlines);
+  info->totalnl = add_count (info->totalnl, newlines);
   info->lastnl = lim;
 }
 
@@ -1431,10 +1430,6 @@ print_line_head (char *beg, size_t len, char const *lim, char sep)
 static bool
 print_line_head_mthread (char *beg, size_t len, char const *lim, char sep, struct grep_info *info)
 {
-  uintmax_t *totalnl_local = &(info->totalnl);
-  bool *encoding_error_output_local = &(info->encoding_error_output);
-  bool *done_on_match_local = &(info->done_on_match);
-  bool *out_quiet_local = &(info->out_quiet);
   bool encoding_errors = false;
   if (binary_files != TEXT_BINARY_FILES)
   {
@@ -1444,7 +1439,7 @@ print_line_head_mthread (char *beg, size_t len, char const *lim, char sep, struc
   }
   if (encoding_errors)
   {
-    *encoding_error_output_local = *done_on_match_local = *out_quiet_local = true;
+    info->encoding_error_output = info->done_on_match = info->out_quiet = true;
     return false;
   }
   
@@ -1464,12 +1459,12 @@ print_line_head_mthread (char *beg, size_t len, char const *lim, char sep, struc
     if (info->lastnl < lim)
     {
       nlscan_mthread (beg,info);
-      *totalnl_local = add_count (*totalnl_local, 1);
+      info->totalnl = add_count (info->totalnl, 1);
       info->lastnl = lim;
     }
     if (pending_sep)
       print_sep (sep);
-    print_offset (*totalnl_local, 4, line_num_color);
+    print_offset (info->totalnl, 4, line_num_color);
     pending_sep = true;
   }
   
@@ -1715,7 +1710,6 @@ prline (char *beg, char *lim, char sep)
 static void
 prline_mthread (char *beg, char *lim, char sep, struct grep_info *info)
 {
-  char ** lastout_local = &(info->lastout);
   bool matching;
   const char *line_color;
   const char *match_color;
@@ -1765,7 +1759,7 @@ prline_mthread (char *beg, char *lim, char sep, struct grep_info *info)
   if (stdout_errno)
     error (EXIT_TROUBLE, stdout_errno, _("write error"));
   
-  *lastout_local = lim;
+  info->lastout = lim;
 }
 
 /* Print pending lines of trailing context prior to LIM. Trailing context ends
@@ -1794,23 +1788,20 @@ prpending (char const *lim)
 static void
 prpending_mthread (char const *lim, struct grep_info *info)
 {
-  intmax_t *pending_local = &(info->pending);
-  intmax_t outleft_local = info->outleft;
-  char ** lastout_local = &(info->lastout);
-  if (!(*lastout_local))
-    *lastout_local = info->bufbeg;
-  while (*pending_local > 0 && *lastout_local < lim)
+  if (!(info->lastout))
+    info->lastout = info->bufbeg;
+  while (info->pending > 0 && info->lastout < lim)
   {
-    char *nl = memchr (*lastout_local, eolbyte, lim - *lastout_local);
+    char *nl = memchr (info->lastout, eolbyte, lim - info->lastout);
     size_t match_size;
-    --(*pending_local);
-    if (outleft_local
-        || ((execute (*lastout_local, nl + 1 - *lastout_local,
+    --(info->pending);
+    if (info->outleft
+        || ((execute (info->lastout, nl + 1 - info->lastout,
                       &match_size, NULL) == (size_t) -1)
             == !out_invert))
-      prline_mthread (*lastout_local, nl + 1, SEP_CHAR_REJECTED, info);
+      prline_mthread (info->lastout, nl + 1, SEP_CHAR_REJECTED, info);
     else
-      *pending_local = 0;
+      info->pending = 0;
   }
 }
 /* Output the lines between BEG and LIM.  Deal with context.  */
@@ -1888,24 +1879,18 @@ prtext (char *beg, char *lim)
 static void
 prtext_mthread (char *beg, char *lim, struct grep_info *info)
 {
-  intmax_t *outleft_local =&(info->outleft);
-  char ** lastout_local = &(info->lastout);
-  off_t *after_last_match_local = &(info->after_last_match);
-  intmax_t *pending_local = &(info->pending);
-  bool *out_quiet_local = &(info->out_quiet);
-  
   static bool used;	/* Avoid printing SEP_STR_GROUP before any output.  */
   char eol = eolbyte;
   
-  if (!*out_quiet_local && *pending_local > 0)
+  if (!info->out_quiet && info->pending > 0)
     prpending_mthread (beg, info);
   
   char *p = beg;
   
-  if (!*out_quiet_local)
+  if (!info->out_quiet)
   {
     /* Deal with leading context.  */
-    char const *bp = *lastout_local ? *lastout_local : info->bufbeg;
+    char const *bp = info->lastout ? info->lastout : info->bufbeg;
     intmax_t i;
     for (i = 0; i < out_before; ++i)
       if (p > bp)
@@ -1916,7 +1901,7 @@ prtext_mthread (char *beg, char *lim, struct grep_info *info)
     /* Print the group separator unless the output is adjacent to
      the previous output in the file.  */
     if ((0 <= out_before || 0 <= out_after) && used
-        && p != *lastout_local && group_separator)
+        && p != info->lastout && group_separator)
     {
       pr_sgr_start_if (sep_color);
       fputs_errno (group_separator);
@@ -1937,11 +1922,11 @@ prtext_mthread (char *beg, char *lim, struct grep_info *info)
   if (out_invert)
   {
     /* One or more lines are output.  */
-    for (n = 0; p < lim && n < *outleft_local; n++)
+    for (n = 0; p < lim && n < info->outleft; n++)
     {
       char *nl = memchr (p, eol, lim - p);
       nl++;
-      if (!*out_quiet_local)
+      if (!info->out_quiet)
         prline_mthread (p, nl, SEP_CHAR_SELECTED, info);
       p = nl;
     }
@@ -1949,16 +1934,16 @@ prtext_mthread (char *beg, char *lim, struct grep_info *info)
   else
   {
     /* Just one line is output.  */
-    if (!*out_quiet_local)
+    if (!info->out_quiet)
       prline_mthread (beg, lim, SEP_CHAR_SELECTED, info);
     n = 1;
     p = lim;
   }
   
-  *after_last_match_local = info->bufoffset - (info->buflim - p);
-  *pending_local = *out_quiet_local ? 0 : MAX (0, out_after);
+  info->after_last_match = info->bufoffset - (info->buflim - p);
+  info->pending = info->out_quiet ? 0 : MAX (0, out_after);
   used = true;
-  *outleft_local -= n;
+  info->outleft -= n;
 }
 
 /* Replace all NUL bytes in buffer P (which ends at LIM) with EOL.
@@ -2030,7 +2015,6 @@ grepbuf_mthread (char *beg, char const *lim, struct grep_info *info)
 {
   intmax_t outleft0 = info->outleft;
   char *endp;
-  bool *done_on_match_local = &(info->done_on_match);
   
   for (char *p = beg; p < lim; p = endp)
   {
@@ -2053,7 +2037,7 @@ grepbuf_mthread (char *beg, char const *lim, struct grep_info *info)
       char *prbeg = out_invert ? p : b;
       char *prend = out_invert ? b : endp;
       prtext_mthread (prbeg, prend, info);
-      if (!(info->outleft) || *done_on_match_local)
+      if (!(info->outleft) || info->done_on_match)
       {
         if (exit_on_match)
           exit (errseen ? exit_failure : EXIT_SUCCESS);
@@ -2451,8 +2435,13 @@ thread_routine(void *arg){
   {
     /* wait until the fts_lock becomes available */
     if(pthread_mutex_trylock (fts_lock) != 0) continue;
+    if(traversal_done){
+      pthread_mutex_unlock (fts_lock);
+      break;
+    }
     FTSENT *ent;
     if(!(ent = fts_read (fts_global))){
+      traversal_done = true;
       pthread_mutex_unlock (fts_lock);
       return NULL;
     }
@@ -2552,9 +2541,10 @@ thread_routine(void *arg){
         abort ();
     }
     int dirdesc = fts_global->fts_cwd_fd;
+    char const *accpath = ent->fts_accpath;
     pthread_mutex_unlock (fts_lock);
     bool local_status =
-    grepfile_mthread (dirdesc, ent->fts_accpath, follow,
+    grepfile_mthread (dirdesc, accpath, follow,
                       ((struct thread_routine_arg *)arg)->command_line_local, thread_id);
     status_array[thread_id] &= local_status;
   }
@@ -2656,11 +2646,12 @@ static bool grepdesc_traversal_mthread (int desc, bool command_line){
     initialize_grep_info(grep_info_array+i);
   }
   pthread_mutex_init (fts_lock, NULL);
-  
+  traversal_done = false;
   for (intmax_t i=0; i<num_threads; ++i){
     status_array[i] = true;
     thread_routine_arg_array[i].command_line_local = true;
     thread_routine_arg_array[i].thread_id = i;
+    grep_info_array[i].thread_id = i;
     pthread_create (&threads[i], NULL, thread_routine,
                     (void *) &thread_routine_arg_array[i]);
   }
@@ -2679,6 +2670,7 @@ static bool grepdesc_traversal_mthread (int desc, bool command_line){
   //            suppressible_error (filename, errno);
   if (fts_close (fts_global) != 0)
     suppressible_error (filename, errno);
+  
   return status;
 }
 
