@@ -18,7 +18,7 @@
 
 /* Written July 1992 by Mike Haertel.  */
 
-#include "config.h"
+#include <config.h>
 #include <sys/types.h>
 #include <sys/stat.h>
 #include <wchar.h>
@@ -566,32 +566,36 @@ struct grep_info{
   uintmax_t totalnl;
   int out_file;
   off_t bufoffset;
+  int bufdesc;
+  size_t bufalloc;
+  size_t pagesize;
+  char *buffer;
   intmax_t thread_id;
 };
 
 struct thread_routine_arg{
   bool command_line_local;
   char const *filename_local;
+  bool no_filenames;
   intmax_t thread_id;
 };
 
 static bool *status_array;  /* return status for each thread */
 static pthread_t *threads;
-static pthread_mutex_t fts_lock;
-static pthread_mutex_t grep_lock;
+
 static struct thread_routine_arg *thread_routine_arg_array;
 static struct grep_info *grep_info_array;
-static bool traversal_done;
 
 static bool grepfile (int, char const *, bool, bool);
 static bool grepfile_mthread (int, char const *, bool, bool, intmax_t);
 static intmax_t grep_mthread (int, struct stat const *, struct grep_info *);
 
-void initialize_grep_info(struct grep_info *);
+void initialize_grep_info (struct grep_info *);
 static bool grepdesc (int, bool);
 static bool grepdesc_traversal_mthread (int, bool);
 static bool grepdesc_mthread (int, bool, intmax_t);
 void * thread_routine(void *arg);
+
 
 static void dos_binary (void);
 static void dos_unix_byte_offsets (void);
@@ -956,9 +960,9 @@ reset (int fd, struct stat const *st)
 static bool
 reset_mthread (int fd, struct stat const *st, struct grep_info *info)
 {
-  info->bufbeg = info->buflim = ALIGN_TO (buffer + 1, pagesize);
+  info->bufbeg = info->buflim = ALIGN_TO (info->buffer + 1, pagesize);
   (info->bufbeg)[-1] = eolbyte;
-  bufdesc = fd;
+  info->bufdesc = fd;
   
   if (S_ISREG (st->st_mode))
   {
@@ -1109,25 +1113,25 @@ fillbuf_mthread (size_t save, struct stat const *st, struct grep_info *info)
   
   /* Offset from start of buffer to start of old stuff
    that we want to save.  */
-  size_t saved_offset = info->buflim - save - buffer;
+  size_t saved_offset = info->buflim - save - info->buffer;
   
-  if (pagesize <= buffer + bufalloc - sizeof (uword) - info->buflim)
+  if (info->pagesize <= info->buffer + info->bufalloc - sizeof (uword) - info->buflim)
   {
     readbuf = info->buflim;
     info->bufbeg = info->buflim - save;
   }
   else
   {
-    size_t minsize = save + pagesize;
+    size_t minsize = save + info->pagesize;
     size_t newsize;
     size_t newalloc;
     char *newbuf;
     
     /* Grow newsize until it is at least as great as minsize.  */
-    for (newsize = bufalloc - pagesize - sizeof (uword);
+    for (newsize = info->bufalloc - info->pagesize - sizeof (uword);
          newsize < minsize;
          newsize *= 2)
-      if ((SIZE_MAX - pagesize - sizeof (uword)) / 2 < newsize)
+      if ((SIZE_MAX - info->pagesize - sizeof (uword)) / 2 < newsize)
         xalloc_die ();
     
     /* Try not to allocate more memory than the file size indicates,
@@ -1149,28 +1153,28 @@ fillbuf_mthread (size_t save, struct stat const *st, struct grep_info *info)
     /* Add enough room so that the buffer is aligned and has room
      for byte sentinels fore and aft, and so that a uword can
      be read aft.  */
-    newalloc = newsize + pagesize + sizeof (uword);
+    newalloc = newsize + info->pagesize + sizeof (uword);
     
-    newbuf = bufalloc < newalloc ? xmalloc (bufalloc = newalloc) : buffer;
-    readbuf = ALIGN_TO (newbuf + 1 + save, pagesize);
+    newbuf = info->bufalloc < newalloc ? xmalloc (info->bufalloc = newalloc) : info->buffer;
+    readbuf = ALIGN_TO (newbuf + 1 + save, info->pagesize);
     info->bufbeg = readbuf - save;
-    memmove (info->bufbeg, buffer + saved_offset, save);
+    memmove (info->bufbeg, info->buffer + saved_offset, save);
     (info->bufbeg)[-1] = eolbyte;
-    if (newbuf != buffer)
+    if (newbuf != info->buffer)
     {
-      free (buffer);
-      buffer = newbuf;
+      free (info->buffer);
+      info->buffer = newbuf;
     }
   }
   
   clear_asan_poison ();
   
-  readsize = buffer + bufalloc - sizeof (uword) - readbuf;
-  readsize -= readsize % pagesize;
+  readsize = info->buffer + info->bufalloc - sizeof (uword) - readbuf;
+  readsize -= readsize % info->pagesize;
   
   while (true)
   {
-    fillsize = safe_read (bufdesc, readbuf, readsize);
+    fillsize = safe_read (info->bufdesc, readbuf, readsize);
     if (fillsize == SAFE_READ_ERROR)
     {
       fillsize = 0;
@@ -1185,10 +1189,10 @@ fillbuf_mthread (size_t save, struct stat const *st, struct grep_info *info)
     if (SEEK_DATA != SEEK_SET && !info->seek_data_failed)
     {
       /* Solaris SEEK_DATA fails with errno == ENXIO in a hole at EOF.  */
-      off_t data_start = lseek (bufdesc, info->bufoffset, SEEK_DATA);
+      off_t data_start = lseek (info->bufdesc, info->bufoffset, SEEK_DATA);
       if (data_start < 0 && errno == ENXIO
           && usable_st_size (st) && info->bufoffset < st->st_size)
-        data_start = lseek (bufdesc, 0, SEEK_END);
+        data_start = lseek (info->bufdesc, 0, SEEK_END);
       
       if (data_start < 0)
         info->seek_data_failed = true;
@@ -1211,7 +1215,7 @@ fillbuf_mthread (size_t save, struct stat const *st, struct grep_info *info)
   /* Mark the part of the buffer not filled by the read or set by
    the above memset call as ASAN-poisoned.  */
   asan_poison (info->buflim + sizeof (uword),
-               bufalloc - (info->buflim - buffer) - sizeof (uword));
+               info->bufalloc - (info->buflim - info->buffer) - sizeof (uword));
   
   return cc;
 }
@@ -1247,7 +1251,7 @@ static intmax_t max_count;	/* Stop after outputting this many
 static bool line_buffered;	/* Use line buffering.  */
 static char *label = NULL;      /* Fake filename for stdin */
 
-FTS *fts_global;            /* FTS variable for multithreading */
+FTS **fts_global_array;            /* FTS variable for multithreading */
 
 /* Internal variables to keep track of byte count, context, etc. */
 static uintmax_t totalcc;	/* Total character count before bufbeg. */
@@ -2236,7 +2240,6 @@ grep_mthread (int fd, struct stat const *st, struct grep_info *info)
     suppressible_error (info->filename, errno);
     return 0;
   }
-  
   for (bool firsttime = true; ; firsttime = false)
   {
     if (nlines_first_null < 0 && eol && binary_files != TEXT_BINARY_FILES
@@ -2277,7 +2280,7 @@ grep_mthread (int fd, struct stat const *st, struct grep_info *info)
       lim = beg - residue;
     beg -= residue;
     residue = info->buflim - lim;
-    pthread_mutex_lock(&grep_lock);
+    
     if (beg < lim)
     {
       if (info->outleft)
@@ -2328,7 +2331,6 @@ grep_mthread (int fd, struct stat const *st, struct grep_info *info)
   }
   
 finish_grep:
-  pthread_mutex_unlock(&grep_lock);
   info->done_on_match = done_on_match_0;
   info->out_quiet = out_quiet_0;
   if (!info->out_quiet && (info->encoding_error_output
@@ -2338,6 +2340,7 @@ finish_grep:
     if (line_buffered)
       fflush_errno ();
   }
+  
   return nlines;
 }
 
@@ -2431,31 +2434,39 @@ grepdirent (FTS *fts, FTSENT *ent, bool command_line)
   return grepfile (fts->fts_cwd_fd, ent->fts_accpath, follow, command_line);
 }
 
+bool traverse_forward (FTSENT **, intmax_t);
+
+bool
+traverse_forward (FTSENT **ent, intmax_t thread_id)
+{
+  bool has_entry = true;
+  for (int i=0; i<num_threads && has_entry; ++i)
+  {
+    has_entry = (*ent = fts_read (fts_global_array[thread_id]));
+  }
+  return has_entry;
+}
+
 void *
 thread_routine(void *arg){
-  while(true)
+  bool has_entry = true;
+  intmax_t thread_id = ((struct thread_routine_arg *)arg)->thread_id;
+  FTSENT *ent;
+  has_entry = (ent = fts_read (fts_global_array[thread_id]));
+  for (intmax_t i=0; i<thread_id; ++i)
   {
-    /* wait until the fts_lock becomes available */
-    pthread_mutex_lock(&fts_lock);
-    if(traversal_done){
-      pthread_mutex_unlock (&fts_lock);
-      break;
-    }
-    FTSENT *ent;
-    if(!(ent = fts_read (fts_global))){
-      traversal_done = true;
-      pthread_mutex_unlock (&fts_lock);
-      return NULL;
-    }
-    intmax_t thread_id = ((struct thread_routine_arg *)arg)->thread_id;
+    has_entry = (ent = fts_read (fts_global_array[thread_id]));
+  }
+  while (has_entry)
+  {
     bool follow;
     ((struct thread_routine_arg *)arg)->command_line_local &= ent->fts_level == FTS_ROOTLEVEL;
     
     if (ent->fts_info == FTS_DP)
     {
       if (directories == RECURSE_DIRECTORIES && ((struct thread_routine_arg *)arg)->command_line_local)
-        grep_info_array[thread_id].out_file &= ~ (2 * !no_filenames);
-      pthread_mutex_unlock (&fts_lock);
+        grep_info_array[thread_id].out_file &= ~ (2 * !(((struct thread_routine_arg *)arg)->no_filenames));
+      has_entry = traverse_forward (&ent, thread_id);
       continue;
     }
     
@@ -2464,16 +2475,16 @@ thread_routine(void *arg){
                          (ent->fts_info == FTS_D || ent->fts_info == FTS_DC
                           || ent->fts_info == FTS_DNR)))
     {
-      fts_set (fts_global, ent, FTS_SKIP);
-      pthread_mutex_unlock (&fts_lock);
+      fts_set (fts_global_array[thread_id], ent, FTS_SKIP);
+      has_entry = traverse_forward (&ent, thread_id);
       continue;
     }
     
     ((struct thread_routine_arg *)arg)->filename_local = ent->fts_path;
     if (omit_dot_slash && (((struct thread_routine_arg *)arg)->filename_local)[1])
       ((struct thread_routine_arg *)arg)->filename_local += 2;
-    follow = (fts_global->fts_options & FTS_LOGICAL
-              || (fts_global->fts_options & FTS_COMFOLLOW
+    follow = (fts_global_array[thread_id]->fts_options & FTS_LOGICAL
+              || (fts_global_array[thread_id]->fts_options & FTS_COMFOLLOW
                   && ((struct thread_routine_arg *)arg)->command_line_local));
     
     switch (ent->fts_info)
@@ -2481,25 +2492,25 @@ thread_routine(void *arg){
       case FTS_D:
         if (directories == RECURSE_DIRECTORIES)
         {
-          grep_info_array[thread_id].out_file |= 2 * !no_filenames;
-          pthread_mutex_unlock (&fts_lock);
+          grep_info_array[thread_id].out_file |= 2 * !(((struct thread_routine_arg *)arg)->no_filenames);
+          has_entry = traverse_forward (&ent, thread_id);
           continue;
         }
-        fts_set (fts_global, ent, FTS_SKIP);
+        fts_set (fts_global_array[thread_id], ent, FTS_SKIP);
         break;
         
       case FTS_DC:
         if (!suppress_errors)
           error (0, 0, _("warning: %s: %s"), ((struct thread_routine_arg *)arg)->filename_local,
                  _("recursive directory loop"));
-        pthread_mutex_unlock (&fts_lock);
+        has_entry = traverse_forward (&ent, thread_id);
         continue;
         
       case FTS_DNR:
       case FTS_ERR:
       case FTS_NS:
         suppressible_error (((struct thread_routine_arg *)arg)->filename_local, ent->fts_errno);
-        pthread_mutex_unlock (&fts_lock);
+        has_entry = traverse_forward (&ent, thread_id);
         continue;
         
       case FTS_DEFAULT:
@@ -2514,16 +2525,16 @@ thread_routine(void *arg){
              before opening, since opening might have side effects
              on a device.  */
             int flag = follow ? 0 : AT_SYMLINK_NOFOLLOW;
-            if (fstatat (fts_global->fts_cwd_fd, ent->fts_accpath, &st1, flag) != 0)
+            if (fstatat (fts_global_array[thread_id]->fts_cwd_fd, ent->fts_accpath, &st1, flag) != 0)
             {
               suppressible_error (((struct thread_routine_arg *)arg)->filename_local, errno);
-              pthread_mutex_unlock (&fts_lock);
+              has_entry = traverse_forward (&ent, thread_id);
               continue;
             }
             st = &st1;
           }
           if (is_device_mode (st->st_mode)){
-            pthread_mutex_unlock (&fts_lock);
+            has_entry = traverse_forward (&ent, thread_id);
             continue;
           }
         }
@@ -2535,20 +2546,19 @@ thread_routine(void *arg){
         
       case FTS_SL:
       case FTS_W:
-        pthread_mutex_unlock (&fts_lock);
+        has_entry = traverse_forward (&ent, thread_id);
         continue;
         
       default:
-        pthread_mutex_unlock (&fts_lock);
         abort ();
     }
-    int dirdesc = fts_global->fts_cwd_fd;
+    int dirdesc = fts_global_array[thread_id]->fts_cwd_fd;
     char const *accpath = ent->fts_accpath;
-    pthread_mutex_unlock (&fts_lock);
     bool local_status =
     grepfile_mthread (dirdesc, accpath, follow,
                       ((struct thread_routine_arg *)arg)->command_line_local, thread_id);
     status_array[thread_id] &= local_status;
+    has_entry = traverse_forward (&ent, thread_id);
   }
   return NULL;
 }
@@ -2614,6 +2624,9 @@ void initialize_grep_info(struct grep_info *info){
   info -> filename         = filename;
   info -> totalnl          = 0;
   info -> out_file         = out_file;
+  info -> bufalloc         = bufalloc;
+  info -> pagesize         = pagesize;
+  info -> buffer           = xmalloc (bufalloc);
 }
 
 /* Used for multithreading recursive grep */
@@ -2629,13 +2642,9 @@ static bool grepdesc_traversal_mthread (int desc, bool command_line){
    condition occurs many times in a deep recursion.  */
   if (close (desc) != 0)
     suppressible_error (filename, errno);
-  
+  fts_global_array = (FTS **) malloc (num_threads * sizeof (FTS *));
   fts_arg[0] = (char *) filename;
   fts_arg[1] = NULL;
-  fts_global = fts_open (fts_arg, opts, NULL);
-  
-  if (!fts_global)
-    xalloc_die ();
   
   status_array = (bool *) malloc (num_threads * sizeof (bool));
   threads = (pthread_t *) malloc (num_threads * sizeof (pthread_t));
@@ -2646,13 +2655,15 @@ static bool grepdesc_traversal_mthread (int desc, bool command_line){
   for(int i=0; i<num_threads; ++i)
   {
     initialize_grep_info (grep_info_array+i);
+    fts_global_array[i] = fts_open (fts_arg, opts, NULL);
+    if (!fts_global_array[i])
+      xalloc_die ();
   }
-  pthread_mutex_init (&grep_lock, NULL);
-  pthread_mutex_init (&fts_lock, NULL);
-  traversal_done = false;
+  
   for (intmax_t i=0; i<num_threads; ++i){
     status_array[i] = true;
     thread_routine_arg_array[i].command_line_local = true;
+    thread_routine_arg_array[i].no_filenames = no_filenames;
     thread_routine_arg_array[i].thread_id = i;
     grep_info_array[i].thread_id = i;
     pthread_create (&threads[i], NULL, thread_routine,
@@ -2662,6 +2673,8 @@ static bool grepdesc_traversal_mthread (int desc, bool command_line){
   {
     pthread_join (threads[i], NULL);
     status &= status_array[i];
+    if (fts_close (fts_global_array[i]) != 0)
+      suppressible_error (filename, errno);
   }
   free (threads);
   free (status_array);
@@ -2671,8 +2684,6 @@ static bool grepdesc_traversal_mthread (int desc, bool command_line){
   /* FIXME: fix these two if clauses for multithreading */
   //        if (errno)
   //            suppressible_error (filename, errno);
-  if (fts_close (fts_global) != 0)
-    suppressible_error (filename, errno);
   
   return status;
 }
@@ -2894,7 +2905,9 @@ grepdesc_mthread (int desc, bool command_line, intmax_t thread_id)
     SET_BINARY (desc);
 #endif
   grep_info_array[thread_id].filename = thread_routine_arg_array[thread_id].filename_local;
+  
   count = grep_mthread (desc, &st, &grep_info_array[thread_id]);
+  
   if (count_matches)
   {
     if (grep_info_array[thread_id].out_file)
@@ -2924,7 +2937,6 @@ closeout:
     suppressible_error (thread_routine_arg_array[thread_id].filename_local, errno);
   return status;
 }
-
 
 static bool
 grep_command_line_arg (char const *arg)
@@ -3879,7 +3891,8 @@ main (int argc, char **argv)
     abort ();
   pagesize = psize;
   bufalloc = ALIGN_TO (INITIAL_BUFSIZE, pagesize) + pagesize + sizeof (uword);
-  buffer = xmalloc (bufalloc);
+  if  (!parallel)
+    buffer = xmalloc (bufalloc);
   
   if (fts_options & FTS_LOGICAL && devices == READ_COMMAND_LINE_DEVICES)
     devices = READ_DEVICES;
