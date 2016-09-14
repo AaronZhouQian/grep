@@ -2314,7 +2314,7 @@ grep_mthread (int fd, struct stat const *st, struct grep_info *info)
     if (out_byte)
       info->totalcc = add_count (info->totalcc, info->buflim - info->bufbeg - save);
     if (out_line)
-      nlscan (beg);
+      nlscan_mthread (beg, info);
     if (! fillbuf_mthread (save, st, info))
     {
       suppressible_error (info->filename, errno);
@@ -2434,88 +2434,72 @@ grepdirent (FTS *fts, FTSENT *ent, bool command_line)
   return grepfile (fts->fts_cwd_fd, ent->fts_accpath, follow, command_line);
 }
 
-bool traverse_forward (FTSENT **, intmax_t);
-
-bool
-traverse_forward (FTSENT **ent, intmax_t thread_id)
-{
-  bool has_entry = true;
-  for (int i=0; i<num_threads && has_entry; ++i)
-  {
-    has_entry = (*ent = fts_read (fts_global_array[thread_id]));
-  }
-  return has_entry;
-}
-
 void *
 thread_routine(void *arg){
-  bool has_entry = true;
   intmax_t thread_id = ((struct thread_routine_arg *)arg)->thread_id;
+  bool has_entry = true;
+  int counter = 0;
   FTSENT *ent;
   has_entry = (ent = fts_read (fts_global_array[thread_id]));
-  for (intmax_t i=0; i<thread_id; ++i)
-  {
-    has_entry = (ent = fts_read (fts_global_array[thread_id]));
-  }
   while (has_entry)
   {
     bool follow;
-    ((struct thread_routine_arg *)arg)->command_line_local &= ent->fts_level == FTS_ROOTLEVEL;
+    thread_routine_arg_array[thread_id].command_line_local &= ent->fts_level == FTS_ROOTLEVEL;
     
     if (ent->fts_info == FTS_DP)
     {
-      if (directories == RECURSE_DIRECTORIES && ((struct thread_routine_arg *)arg)->command_line_local)
-        grep_info_array[thread_id].out_file &= ~ (2 * !(((struct thread_routine_arg *)arg)->no_filenames));
-      has_entry = traverse_forward (&ent, thread_id);
+      if (thread_routine_arg_array[thread_id].command_line_local)
+        grep_info_array[thread_id].out_file &= ~ (2 * !(thread_routine_arg_array[thread_id].no_filenames));
+      counter = (counter + 1) % num_threads;
+      has_entry = (ent = fts_read (fts_global_array[thread_id]));
       continue;
     }
     
-    if (!((struct thread_routine_arg *)arg)->command_line_local
+    if (!thread_routine_arg_array[thread_id].command_line_local
         && skipped_file (ent->fts_name, false,
                          (ent->fts_info == FTS_D || ent->fts_info == FTS_DC
                           || ent->fts_info == FTS_DNR)))
     {
       fts_set (fts_global_array[thread_id], ent, FTS_SKIP);
-      has_entry = traverse_forward (&ent, thread_id);
+      counter = (counter + 1) % num_threads;
+      has_entry = (ent = fts_read (fts_global_array[thread_id]));
       continue;
     }
     
-    ((struct thread_routine_arg *)arg)->filename_local = ent->fts_path;
-    if (omit_dot_slash && (((struct thread_routine_arg *)arg)->filename_local)[1])
-      ((struct thread_routine_arg *)arg)->filename_local += 2;
+    thread_routine_arg_array[thread_id].filename_local = ent->fts_path;
+    if (omit_dot_slash && (thread_routine_arg_array[thread_id].filename_local)[1])
+      thread_routine_arg_array[thread_id].filename_local += 2;
     follow = (fts_global_array[thread_id]->fts_options & FTS_LOGICAL
               || (fts_global_array[thread_id]->fts_options & FTS_COMFOLLOW
-                  && ((struct thread_routine_arg *)arg)->command_line_local));
+                  && thread_routine_arg_array[thread_id].command_line_local));
     
     switch (ent->fts_info)
     {
       case FTS_D:
-        if (directories == RECURSE_DIRECTORIES)
-        {
-          grep_info_array[thread_id].out_file |= 2 * !(((struct thread_routine_arg *)arg)->no_filenames);
-          has_entry = traverse_forward (&ent, thread_id);
-          continue;
-        }
-        fts_set (fts_global_array[thread_id], ent, FTS_SKIP);
-        break;
+        grep_info_array[thread_id].out_file |= 2 * !(thread_routine_arg_array[thread_id].no_filenames);
+        counter = (counter + 1) % num_threads;
+        has_entry = (ent = fts_read (fts_global_array[thread_id]));
+        continue;
         
       case FTS_DC:
         if (!suppress_errors)
-          error (0, 0, _("warning: %s: %s"), ((struct thread_routine_arg *)arg)->filename_local,
+          error (0, 0, _("warning: %s: %s"), thread_routine_arg_array[thread_id].filename_local,
                  _("recursive directory loop"));
-        has_entry = traverse_forward (&ent, thread_id);
+        counter = (counter + 1) % num_threads;
+        has_entry = (ent = fts_read (fts_global_array[thread_id]));
         continue;
         
       case FTS_DNR:
       case FTS_ERR:
       case FTS_NS:
-        suppressible_error (((struct thread_routine_arg *)arg)->filename_local, ent->fts_errno);
-        has_entry = traverse_forward (&ent, thread_id);
+        suppressible_error (thread_routine_arg_array[thread_id].filename_local, ent->fts_errno);
+        counter = (counter + 1) % num_threads;
+        has_entry = (ent = fts_read (fts_global_array[thread_id]));
         continue;
         
       case FTS_DEFAULT:
       case FTS_NSOK:
-        if (skip_devices (((struct thread_routine_arg *)arg)->command_line_local))
+        if (skip_devices (thread_routine_arg_array[thread_id].command_line_local))
         {
           struct stat *st = ent->fts_statp;
           struct stat st1;
@@ -2527,14 +2511,16 @@ thread_routine(void *arg){
             int flag = follow ? 0 : AT_SYMLINK_NOFOLLOW;
             if (fstatat (fts_global_array[thread_id]->fts_cwd_fd, ent->fts_accpath, &st1, flag) != 0)
             {
-              suppressible_error (((struct thread_routine_arg *)arg)->filename_local, errno);
-              has_entry = traverse_forward (&ent, thread_id);
+              suppressible_error (thread_routine_arg_array[thread_id].filename_local, errno);
+              counter = (counter + 1) % num_threads;
+              has_entry = (ent = fts_read (fts_global_array[thread_id]));
               continue;
             }
             st = &st1;
           }
           if (is_device_mode (st->st_mode)){
-            has_entry = traverse_forward (&ent, thread_id);
+            counter = (counter + 1) % num_threads;
+            has_entry = (ent = fts_read (fts_global_array[thread_id]));
             continue;
           }
         }
@@ -2546,19 +2532,20 @@ thread_routine(void *arg){
         
       case FTS_SL:
       case FTS_W:
-        has_entry = traverse_forward (&ent, thread_id);
+        counter = (counter + 1) % num_threads;
+        has_entry = (ent = fts_read (fts_global_array[thread_id]));
         continue;
         
       default:
         abort ();
     }
-    int dirdesc = fts_global_array[thread_id]->fts_cwd_fd;
-    char const *accpath = ent->fts_accpath;
-    bool local_status =
-    grepfile_mthread (dirdesc, accpath, follow,
-                      ((struct thread_routine_arg *)arg)->command_line_local, thread_id);
-    status_array[thread_id] &= local_status;
-    has_entry = traverse_forward (&ent, thread_id);
+    if (counter == thread_id){
+      status_array[thread_id] &=
+      grepfile_mthread (fts_global_array[thread_id]->fts_cwd_fd, ent->fts_accpath, follow,
+                        thread_routine_arg_array[thread_id].command_line_local, thread_id);
+    }
+    counter = (counter + 1) % num_threads;
+    has_entry = (ent = fts_read (fts_global_array[thread_id]));
   }
   return NULL;
 }
