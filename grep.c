@@ -582,8 +582,7 @@ struct thread_routine_arg{
 
 static bool *status_array;  /* return status for each thread */
 static pthread_t *threads;
-static pthread_mutex_t count_matches_lock, out_invert_lock,
-grepbuf_out_invert_lock, list_files_lock, printf_errno_lock;
+static pthread_mutex_t output_lock;
 static struct thread_routine_arg *thread_routine_arg_array;
 static struct grep_info *grep_info_array;
 
@@ -1929,7 +1928,6 @@ prtext_mthread (char *beg, char *lim, struct grep_info *info)
   if (out_invert)
   {
     /* One or more lines are output.  */
-    pthread_mutex_lock (&out_invert_lock);
     for (n = 0; p < lim && n < info->outleft; n++)
     {
       char *nl = memchr (p, eol, lim - p);
@@ -1938,7 +1936,6 @@ prtext_mthread (char *beg, char *lim, struct grep_info *info)
         prline_mthread (p, nl, SEP_CHAR_SELECTED, info);
       p = nl;
     }
-    pthread_mutex_unlock (&out_invert_lock);
   }
   else
   {
@@ -2045,9 +2042,9 @@ grepbuf_mthread (char *beg, char const *lim, struct grep_info *info)
     {
       char *prbeg = out_invert ? p : b;
       char *prend = out_invert ? b : endp;
-      pthread_mutex_lock (&grepbuf_out_invert_lock);
+      
       prtext_mthread (prbeg, prend, info);
-      pthread_mutex_unlock (&grepbuf_out_invert_lock);
+      
       if (!(info->outleft) || info->done_on_match)
       {
         if (exit_on_match)
@@ -2289,10 +2286,12 @@ grep_mthread (int fd, struct stat const *st, struct grep_info *info)
     
     if (beg < lim)
     {
+      pthread_mutex_lock (&output_lock);
       if (info->outleft)
         nlines += grepbuf_mthread (beg, lim, info);
       if (info->pending)
         prpending_mthread (lim, info);
+      pthread_mutex_unlock (&output_lock);
       if ((!info->outleft && !info->pending)
           || (info->done_on_match && MAX (0, nlines_first_null) < nlines))
         goto finish_grep;
@@ -2330,10 +2329,12 @@ grep_mthread (int fd, struct stat const *st, struct grep_info *info)
   if (residue)
   {
     *(info->buflim)++ = eol;
+    pthread_mutex_lock (&output_lock);
     if (info->outleft)
       nlines += grepbuf_mthread (info->bufbeg + save - residue, info->buflim, info);
     if (info->pending)
       prpending_mthread (info->buflim, info);
+    pthread_mutex_unlock (&output_lock);
   }
   
 finish_grep:
@@ -2342,12 +2343,11 @@ finish_grep:
   if (!info->out_quiet && (info->encoding_error_output
                            || (0 <= nlines_first_null && nlines_first_null < nlines)))
   {
-    pthread_mutex_lock (&printf_errno_lock);
-    fflush_errno ();
+    pthread_mutex_lock (&output_lock);
     printf_errno (_("Binary file %s matches\n"), info->filename);
     if (line_buffered)
       fflush_errno ();
-    pthread_mutex_unlock (&printf_errno_lock);
+    pthread_mutex_unlock (&output_lock);
   }
   
   return nlines;
@@ -2648,12 +2648,9 @@ static bool grepdesc_traversal_mthread (int desc, bool command_line){
   malloc (num_threads * sizeof (struct thread_routine_arg));
   grep_info_array = (struct grep_info *)
   malloc (num_threads * sizeof (struct grep_info));
-  /* initialize all locks */
-  pthread_mutex_init (&count_matches_lock, NULL);
-  pthread_mutex_init (&out_invert_lock, NULL);
-  pthread_mutex_init (&grepbuf_out_invert_lock, NULL);
-  pthread_mutex_init (&list_files_lock, NULL);
-  pthread_mutex_init (&printf_errno_lock, NULL);
+  
+  pthread_mutex_init (&output_lock, NULL);
+  
   for(int i=0; i<num_threads; ++i)
   {
     initialize_grep_info (grep_info_array+i);
@@ -2913,7 +2910,7 @@ grepdesc_mthread (int desc, bool command_line, intmax_t thread_id)
   
   if (count_matches)
   {
-    pthread_mutex_lock (&count_matches_lock);
+    pthread_mutex_lock (&output_lock);
     if (grep_info_array[thread_id].out_file)
     {
       print_filename_in_thread(grep_info_array[thread_id].filename);
@@ -2925,18 +2922,18 @@ grepdesc_mthread (int desc, bool command_line, intmax_t thread_id)
     printf_errno ("%" PRIdMAX "\n", count);
     if (line_buffered)
       fflush_errno ();
-    pthread_mutex_unlock (&count_matches_lock);
+    pthread_mutex_unlock (&output_lock);
   }
   
   status = !count;
   if (list_files == (status ? LISTFILES_NONMATCHING : LISTFILES_MATCHING))
   {
-    pthread_mutex_lock (&list_files_lock);
+    pthread_mutex_lock (&output_lock);
     print_filename_in_thread(grep_info_array[thread_id].filename);
     putchar_errno ('\n' & filename_mask);
     if (line_buffered)
       fflush_errno ();
-    pthread_mutex_unlock (&list_files_lock);
+    pthread_mutex_unlock (&output_lock);
   }
   
 closeout:
