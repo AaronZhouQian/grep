@@ -411,25 +411,30 @@ static void
 putc_errno_mthread (int num_nodes_visited, int c)
 {
   char **content = &output_buffer[num_nodes_visited].content;
-  if (output_buffer[num_nodes_visited].max_length  - output_buffer[num_nodes_visited].actual_length < 4)
-  {
-    if (output_buffer[num_nodes_visited].max_length == 0)
-    {
-      output_buffer[num_nodes_visited].end = output_buffer[num_nodes_visited].content = (char *) malloc (initial_buffstring_length * sizeof(char));
-      output_buffer[num_nodes_visited].max_length = initial_buffstring_length;
-    }
-    output_buffer[num_nodes_visited].max_length += 4;
-    output_buffer[num_nodes_visited].max_length *= 2;
-    *content = (char *) realloc (*content, output_buffer[num_nodes_visited].max_length * sizeof (char));
-    output_buffer[num_nodes_visited].end = output_buffer[num_nodes_visited].content + output_buffer[num_nodes_visited].actual_length;
-  }
   char **end = &output_buffer[num_nodes_visited].end;
+  intmax_t *actual_length_addr = &output_buffer[num_nodes_visited].actual_length;
+  intmax_t *max_length_addr = &output_buffer[num_nodes_visited].max_length;
+  intmax_t original_max_length = *max_length_addr;
+  if (original_max_length - *actual_length_addr < 4)
+  {
+    if (original_max_length == 0)
+    {
+      *end =
+      *content = (char *) malloc (initial_buffstring_length * sizeof(char));
+      *max_length_addr = initial_buffstring_length;
+    }
+    *max_length_addr += 4;
+    *max_length_addr *= 2;
+    *content = (char *) realloc (*content, *max_length_addr * sizeof (char));
+    *end = *content + *actual_length_addr;
+  }
+  
   int num_bytes_written;
   if ((num_bytes_written = snprintf (*end, 2, "%c", c)) < 0)
     stdout_errno = errno;
-  /* ignoring the null byte */
+  /* ignoring the null byte by snprintf*/
   *end += (num_bytes_written < 0 ? 0 : num_bytes_written);
-  output_buffer[num_nodes_visited].actual_length += num_bytes_written;
+  *actual_length_addr += num_bytes_written;
 }
 
 static void
@@ -442,26 +447,31 @@ fputs_errno (char const *s)
 static void
 fputs_errno_mthread (int num_nodes_visited, char const *s)
 {
-  size_t size = strlen (s) + 1;
-  if (output_buffer[num_nodes_visited].max_length - output_buffer[num_nodes_visited].actual_length < size + 4)
-  {
-    if (output_buffer[num_nodes_visited].max_length == 0)
-    {
-      output_buffer[num_nodes_visited].end = output_buffer[num_nodes_visited].content = (char *) malloc (initial_buffstring_length * sizeof(char));
-      output_buffer[num_nodes_visited].max_length = initial_buffstring_length;
-    }
-    output_buffer[num_nodes_visited].max_length += size + 4;
-    output_buffer[num_nodes_visited].max_length *= 2;
-    output_buffer[num_nodes_visited].content =
-    (char *) realloc (output_buffer[num_nodes_visited].content, output_buffer[num_nodes_visited].max_length * sizeof (char));
-    output_buffer[num_nodes_visited].end = output_buffer[num_nodes_visited].content + output_buffer[num_nodes_visited].actual_length;
-  }
   char **end = &output_buffer[num_nodes_visited].end;
+  char **content = &output_buffer[num_nodes_visited].content;
+  size_t size = strlen (s) + 1;
+  intmax_t *actual_length_addr = &output_buffer[num_nodes_visited].actual_length;
+  intmax_t *max_length_addr = &output_buffer[num_nodes_visited].max_length;
+  intmax_t original_max_length = *max_length_addr;
+  if (original_max_length - *actual_length_addr < size + 4)
+  {
+    if (original_max_length == 0)
+    {
+      *end =
+      *content = (char *) malloc (initial_buffstring_length * sizeof(char));
+      *max_length_addr = initial_buffstring_length;
+    }
+    *max_length_addr += size + 4;
+    *max_length_addr *= 2;
+    *content = (char *) realloc (*content, *max_length_addr * sizeof (char));
+    *end = *content + *actual_length_addr;
+  }
+  
   int num_bytes_written;
   if ((num_bytes_written = snprintf (*end, size, "%s", s)) < 0)
     stdout_errno = errno;
   *end += (num_bytes_written < 0 ? 0 : num_bytes_written);
-  output_buffer[num_nodes_visited].actual_length += num_bytes_written;
+  *actual_length_addr += num_bytes_written;
 }
 
 static void _GL_ATTRIBUTE_FORMAT_PRINTF (1, 2)
@@ -477,27 +487,30 @@ printf_errno (char const *format, ...)
 static void _GL_ATTRIBUTE_FORMAT_PRINTF (3, 4)
 printf_errno_mthread (int num_nodes_visited, size_t size, char const *format, ...)
 {
-  if (output_buffer[num_nodes_visited].max_length - output_buffer[num_nodes_visited].actual_length < size + 4)
-  {
-    if (output_buffer[num_nodes_visited].max_length == 0)
-    {
-      output_buffer[num_nodes_visited].end = output_buffer[num_nodes_visited].content = (char *) malloc (initial_buffstring_length * sizeof(char));
-      output_buffer[num_nodes_visited].max_length = initial_buffstring_length;
-    }
-    output_buffer[num_nodes_visited].max_length += size + 4;
-    output_buffer[num_nodes_visited].max_length *= 2;
-    output_buffer[num_nodes_visited].content =
-    (char *) realloc (output_buffer[num_nodes_visited].content, output_buffer[num_nodes_visited].max_length * sizeof (char));
-    output_buffer[num_nodes_visited].end = output_buffer[num_nodes_visited].content + output_buffer[num_nodes_visited].actual_length;
-  }
   char **end = &output_buffer[num_nodes_visited].end;
+  char **content = &output_buffer[num_nodes_visited].content;
+  intmax_t *actual_length_addr = &output_buffer[num_nodes_visited].actual_length;
+  intmax_t *max_length_addr = &output_buffer[num_nodes_visited].max_length;
+  intmax_t original_max_length = *max_length_addr;
+  if (original_max_length - *actual_length_addr < size + 4)
+  {
+    if (original_max_length == 0)
+    {
+      *end = *content = (char *) malloc (initial_buffstring_length * sizeof(char));
+      *max_length_addr = initial_buffstring_length;
+    }
+    *max_length_addr += size + 4;
+    *max_length_addr *= 2;
+    *content = (char *) realloc (*content, *max_length_addr * sizeof (char));
+    *end = *content + *actual_length_addr;
+  }
   va_list ap;
   va_start (ap, format);
   int num_bytes_written;
   if ((num_bytes_written = vsnprintf (*end, size, format, ap)) < 0)
     stdout_errno = errno;
   *end += (num_bytes_written < 0 ? 0 : num_bytes_written);
-  output_buffer[num_nodes_visited].actual_length += num_bytes_written;
+  *actual_length_addr += num_bytes_written;
   va_end (ap);
 }
 
@@ -511,23 +524,27 @@ fwrite_errno (void const *ptr, size_t size, size_t nmemb)
 static void
 fwrite_errno_mthread (void const *ptr, size_t size, size_t nmemb, int num_nodes_visited)
 {
-  size_t size_to_copy = size * nmemb;
-  if (output_buffer[num_nodes_visited].max_length - output_buffer[num_nodes_visited].actual_length < size_to_copy + 4)
-  {
-    if (output_buffer[num_nodes_visited].max_length == 0)
-    {
-      output_buffer[num_nodes_visited].end = output_buffer[num_nodes_visited].content = (char *) malloc (initial_buffstring_length * sizeof(char));
-      output_buffer[num_nodes_visited].max_length = initial_buffstring_length;
-    }
-    output_buffer[num_nodes_visited].max_length += size_to_copy * 2;
-    output_buffer[num_nodes_visited].max_length *= 2;
-    output_buffer[num_nodes_visited].content =
-    (char *) realloc(output_buffer[num_nodes_visited].content, output_buffer[num_nodes_visited].max_length * sizeof (char));
-    output_buffer[num_nodes_visited].end = output_buffer[num_nodes_visited].content + output_buffer[num_nodes_visited].actual_length;
-  }
   char **end = &output_buffer[num_nodes_visited].end;
+  char **content = &output_buffer[num_nodes_visited].content;
+  intmax_t *actual_length_addr = &output_buffer[num_nodes_visited].actual_length;
+  intmax_t *max_length_addr = &output_buffer[num_nodes_visited].max_length;
+  intmax_t original_max_length = *max_length_addr;
+  size_t size_to_copy = size * nmemb;
+  if (original_max_length - *actual_length_addr < size_to_copy + 4)
+  {
+    if (original_max_length == 0)
+    {
+      *end = *content = (char *) malloc (initial_buffstring_length * sizeof(char));
+      *max_length_addr = initial_buffstring_length;
+    }
+    *max_length_addr += size_to_copy * 2;
+    *max_length_addr *= 2;
+    *content =
+    (char *) realloc(*content, *max_length_addr * sizeof (char));
+    *end = *content + *actual_length_addr;
+  }
   *end = mempcpy (*end, ptr, size_to_copy);
-  output_buffer[num_nodes_visited].actual_length += size_to_copy;
+  *actual_length_addr += size_to_copy;
   if (*end == NULL)
     stdout_errno = errno;
 }
@@ -747,13 +764,6 @@ raise_max_nodes (int num_nodes_visited)
     output_buffer[i].max_length = 0;
     output_buffer[i].actual_length = 0;
   }
-}
-
-void clear_buffer_node (struct output_buffer_node *);
-void
-clear_buffer_node (struct output_buffer_node *node)
-{
-  free (node->content);
 }
 
 void lock_buffer_locks (void);
