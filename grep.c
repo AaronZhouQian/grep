@@ -388,7 +388,6 @@ struct output_buffer_node
 {
   char *content;
   char *end;
-  bool visited;
   intmax_t max_length;
   intmax_t actual_length;
   
@@ -396,7 +395,7 @@ struct output_buffer_node
 
 static struct output_buffer_node *output_buffer;
 static size_t initial_num_nodes = 1024;
-static size_t initial_buffstring_length = 100;
+static size_t initial_buffstring_length = 128;
 static size_t max_num_nodes;
 
 static void
@@ -412,6 +411,11 @@ putc_errno_mthread (int num_nodes_visited, int c)
   char **content = &output_buffer[num_nodes_visited].content;
   if (output_buffer[num_nodes_visited].max_length  - output_buffer[num_nodes_visited].actual_length < 4)
   {
+    if (output_buffer[num_nodes_visited].max_length == 0)
+    {
+      output_buffer[num_nodes_visited].end = output_buffer[num_nodes_visited].content = (char *) malloc (initial_buffstring_length * sizeof(char));
+      output_buffer[num_nodes_visited].max_length = initial_buffstring_length;
+    }
     output_buffer[num_nodes_visited].max_length += 4;
     output_buffer[num_nodes_visited].max_length *= 2;
     *content = (char *) realloc (*content, output_buffer[num_nodes_visited].max_length * sizeof (char));
@@ -439,6 +443,11 @@ fputs_errno_mthread (int num_nodes_visited, char const *s)
   size_t size = strlen (s) + 1;
   if (output_buffer[num_nodes_visited].max_length - output_buffer[num_nodes_visited].actual_length < size + 4)
   {
+    if (output_buffer[num_nodes_visited].max_length == 0)
+    {
+      output_buffer[num_nodes_visited].end = output_buffer[num_nodes_visited].content = (char *) malloc (initial_buffstring_length * sizeof(char));
+      output_buffer[num_nodes_visited].max_length = initial_buffstring_length;
+    }
     output_buffer[num_nodes_visited].max_length += size + 4;
     output_buffer[num_nodes_visited].max_length *= 2;
     output_buffer[num_nodes_visited].content =
@@ -468,6 +477,11 @@ printf_errno_mthread (int num_nodes_visited, size_t size, char const *format, ..
 {
   if (output_buffer[num_nodes_visited].max_length - output_buffer[num_nodes_visited].actual_length < size + 4)
   {
+    if (output_buffer[num_nodes_visited].max_length == 0)
+    {
+      output_buffer[num_nodes_visited].end = output_buffer[num_nodes_visited].content = (char *) malloc (initial_buffstring_length * sizeof(char));
+      output_buffer[num_nodes_visited].max_length = initial_buffstring_length;
+    }
     output_buffer[num_nodes_visited].max_length += size + 4;
     output_buffer[num_nodes_visited].max_length *= 2;
     output_buffer[num_nodes_visited].content =
@@ -498,6 +512,11 @@ fwrite_errno_mthread (void const *ptr, size_t size, size_t nmemb, int num_nodes_
   size_t size_to_copy = size * nmemb;
   if (output_buffer[num_nodes_visited].max_length - output_buffer[num_nodes_visited].actual_length < size_to_copy + 4)
   {
+    if (output_buffer[num_nodes_visited].max_length == 0)
+    {
+      output_buffer[num_nodes_visited].end = output_buffer[num_nodes_visited].content = (char *) malloc (initial_buffstring_length * sizeof(char));
+      output_buffer[num_nodes_visited].max_length = initial_buffstring_length;
+    }
     output_buffer[num_nodes_visited].max_length += size_to_copy * 2;
     output_buffer[num_nodes_visited].max_length *= 2;
     output_buffer[num_nodes_visited].content =
@@ -691,7 +710,7 @@ struct thread_routine_arg
 
 static bool *status_array;  /* return status for each thread */
 static pthread_t *threads;
-static pthread_mutex_t buffer_lock;
+static pthread_mutex_t *buffer_lock;
 static struct thread_routine_arg *thread_routine_arg_array;
 static struct grep_info *grep_info_array;
 
@@ -721,11 +740,9 @@ raise_max_nodes (int num_nodes_visited)
   output_buffer = (struct output_buffer_node *) realloc (output_buffer, max_num_nodes * sizeof (struct output_buffer_node));
   if (output_buffer == NULL)
     xalloc_die();
-  for (size_t i=max_num_nodes/2; i<max_num_nodes; ++i)
+  for (size_t i = max_num_nodes / 2; i < max_num_nodes; ++i)
   {
-    output_buffer[i].visited = false;
-    output_buffer[i].end = output_buffer[i].content = (char *) malloc (initial_buffstring_length * sizeof(char));
-    output_buffer[i].max_length = initial_buffstring_length;
+    output_buffer[i].max_length = 0;
     output_buffer[i].actual_length = 0;
   }
 }
@@ -735,6 +752,25 @@ void
 clear_buffer_node (struct output_buffer_node *node)
 {
   free (node->content);
+}
+
+void lock_buffer_locks (void);
+void
+lock_buffer_locks (void)
+{
+  for (int i = 0; i < num_threads; ++i)
+  {
+    pthread_mutex_lock (buffer_lock + i);
+  }
+}
+
+void unlock_buffer_locks (void);
+void unlock_buffer_locks (void)
+{
+  for (int i = 0; i < num_threads; ++i)
+  {
+    pthread_mutex_unlock (buffer_lock + i);
+  }
 }
 
 static bool
@@ -1787,7 +1823,7 @@ print_line_middle_mthread (char *beg, char *lim,
           cur = mid;
           mid = NULL;
         }
-        fwrite_errno (cur, 1, b - cur);
+        fwrite_errno_mthread (cur, 1, b - cur, num_nodes_visited);
       }
       
       pr_sgr_start_if (match_color);
@@ -2408,7 +2444,9 @@ grep_mthread (int fd, struct stat const *st, struct grep_info *info)
   char nul_zapper = '\0';
   bool done_on_match_0 = info->done_on_match;
   bool out_quiet_0 = info->out_quiet;
-  int num_nodes_visited = thread_routine_arg_array[info->thread_id].num_nodes_visited;
+  intmax_t thread_id = info->thread_id;
+  int num_nodes_visited = thread_routine_arg_array[thread_id].num_nodes_visited;
+  pthread_mutex_t *local_buffer_lock = buffer_lock + thread_id;
   
   /* The value of NLINES when nulls were first deduced in the input;
    this is not necessarily the same as the number of matching lines
@@ -2480,12 +2518,12 @@ grep_mthread (int fd, struct stat const *st, struct grep_info *info)
     
     if (beg < lim)
     {
-      pthread_mutex_lock (&buffer_lock);
+      pthread_mutex_lock (local_buffer_lock);
       if (info->outleft)
         nlines += grepbuf_mthread (beg, lim, info);
       if (info->pending)
         prpending_mthread (lim, info);
-      pthread_mutex_unlock (&buffer_lock);
+      pthread_mutex_unlock (local_buffer_lock);
       if ((!info->outleft && !info->pending)
           || (info->done_on_match && MAX (0, nlines_first_null) < nlines))
         goto finish_grep;
@@ -2523,12 +2561,12 @@ grep_mthread (int fd, struct stat const *st, struct grep_info *info)
   if (residue)
   {
     *(info->buflim)++ = eol;
-    pthread_mutex_lock (&buffer_lock);
+    pthread_mutex_lock (local_buffer_lock);
     if (info->outleft)
       nlines += grepbuf_mthread (info->bufbeg + save - residue, info->buflim, info);
     if (info->pending)
       prpending_mthread (info->buflim, info);
-    pthread_mutex_unlock (&buffer_lock);
+    pthread_mutex_unlock (local_buffer_lock);
   }
   
 finish_grep:
@@ -2537,13 +2575,14 @@ finish_grep:
   if (!info->out_quiet && (info->encoding_error_output
                            || (0 <= nlines_first_null && nlines_first_null < nlines)))
   {
-    pthread_mutex_lock (&buffer_lock);
-    printf_errno_mthread (num_nodes_visited, strlen(info->filename)+30 ,_("Binary file %s matches\n"), info->filename);
-    /*    we never use line buffering with -r
+    pthread_mutex_lock (local_buffer_lock);
+    printf_errno_mthread (num_nodes_visited, strlen (info->filename) + 30 ,_("Binary file %s matches\n"), info->filename);
+    /*
+     we never use line buffering with -r
      if (line_buffered)
      fflush_errno ();
      */
-    pthread_mutex_unlock (&buffer_lock);
+    pthread_mutex_unlock (local_buffer_lock);
   }
   
   return nlines;
@@ -2656,15 +2695,11 @@ thread_routine(void *arg){
     {
       if (thread_routine_arg_array[thread_id].command_line_local)
         grep_info_array[thread_id].out_file &= ~ (2 * !(thread_routine_arg_array[thread_id].no_filenames));
-      if (counter == thread_id)
+      if (counter == thread_id && *num_nodes_visited > max_num_nodes - 4)
       {
-        if (*num_nodes_visited > max_num_nodes - 4)
-        {
-          pthread_mutex_lock (&buffer_lock);
-          raise_max_nodes (*num_nodes_visited);
-          pthread_mutex_unlock (&buffer_lock);
-        }
-        output_buffer[*num_nodes_visited].visited = true;
+        lock_buffer_locks();
+        raise_max_nodes (*num_nodes_visited);
+        unlock_buffer_locks();
       }
       *num_nodes_visited += 1;
       counter = (counter + 1) % num_threads;
@@ -2678,15 +2713,11 @@ thread_routine(void *arg){
                           || ent->fts_info == FTS_DNR)))
     {
       fts_set (fts_global_array[thread_id], ent, FTS_SKIP);
-      if (counter == thread_id)
+      if (counter == thread_id && *num_nodes_visited > max_num_nodes - 4)
       {
-        if (*num_nodes_visited > max_num_nodes - 4)
-        {
-          pthread_mutex_lock (&buffer_lock);
-          raise_max_nodes (*num_nodes_visited);
-          pthread_mutex_unlock (&buffer_lock);
-        }
-        output_buffer[*num_nodes_visited].visited = true;
+        lock_buffer_locks();
+        raise_max_nodes (*num_nodes_visited);
+        unlock_buffer_locks();
       }
       *num_nodes_visited += 1;
       counter = (counter + 1) % num_threads;
@@ -2705,15 +2736,11 @@ thread_routine(void *arg){
     {
       case FTS_D:
         grep_info_array[thread_id].out_file |= 2 * !(thread_routine_arg_array[thread_id].no_filenames);
-        if (counter == thread_id)
+        if (counter == thread_id && *num_nodes_visited > max_num_nodes - 4)
         {
-          if (*num_nodes_visited > max_num_nodes - 4)
-          {
-            pthread_mutex_lock (&buffer_lock);
-            raise_max_nodes (*num_nodes_visited);
-            pthread_mutex_unlock (&buffer_lock);
-          }
-          output_buffer[*num_nodes_visited].visited = true;
+          lock_buffer_locks();
+          raise_max_nodes (*num_nodes_visited);
+          unlock_buffer_locks();
         }
         *num_nodes_visited += 1;
         counter = (counter + 1) % num_threads;
@@ -2724,15 +2751,11 @@ thread_routine(void *arg){
         if (!suppress_errors)
           error (0, 0, _("warning: %s: %s"), thread_routine_arg_array[thread_id].filename_local,
                  _("recursive directory loop"));
-        if (counter == thread_id)
+        if (counter == thread_id && *num_nodes_visited > max_num_nodes - 4)
         {
-          if (*num_nodes_visited > max_num_nodes - 4)
-          {
-            pthread_mutex_lock (&buffer_lock);
-            raise_max_nodes (*num_nodes_visited);
-            pthread_mutex_unlock (&buffer_lock);
-          }
-          output_buffer[*num_nodes_visited].visited = true;
+          lock_buffer_locks();
+          raise_max_nodes (*num_nodes_visited);
+          unlock_buffer_locks();
         }
         *num_nodes_visited += 1;
         counter = (counter + 1) % num_threads;
@@ -2743,15 +2766,11 @@ thread_routine(void *arg){
       case FTS_ERR:
       case FTS_NS:
         suppressible_error (thread_routine_arg_array[thread_id].filename_local, ent->fts_errno);
-        if (counter == thread_id)
+        if (counter == thread_id && *num_nodes_visited > max_num_nodes - 4)
         {
-          if (*num_nodes_visited > max_num_nodes - 4)
-          {
-            pthread_mutex_lock (&buffer_lock);
-            raise_max_nodes (*num_nodes_visited);
-            pthread_mutex_unlock (&buffer_lock);
-          }
-          output_buffer[*num_nodes_visited].visited = true;
+          lock_buffer_locks();
+          raise_max_nodes (*num_nodes_visited);
+          unlock_buffer_locks();
         }
         *num_nodes_visited += 1;
         counter = (counter + 1) % num_threads;
@@ -2773,15 +2792,11 @@ thread_routine(void *arg){
             if (fstatat (fts_global_array[thread_id]->fts_cwd_fd, ent->fts_accpath, &st1, flag) != 0)
             {
               suppressible_error (thread_routine_arg_array[thread_id].filename_local, errno);
-              if (counter == thread_id)
+              if (counter == thread_id && *num_nodes_visited > max_num_nodes - 4)
               {
-                if (*num_nodes_visited > max_num_nodes - 4)
-                {
-                  pthread_mutex_lock (&buffer_lock);
-                  raise_max_nodes (*num_nodes_visited);
-                  pthread_mutex_unlock (&buffer_lock);
-                }
-                output_buffer[*num_nodes_visited].visited = true;
+                lock_buffer_locks();
+                raise_max_nodes (*num_nodes_visited);
+                unlock_buffer_locks();
               }
               *num_nodes_visited += 1;
               counter = (counter + 1) % num_threads;
@@ -2791,15 +2806,11 @@ thread_routine(void *arg){
             st = &st1;
           }
           if (is_device_mode (st->st_mode)){
-            if (counter == thread_id)
+            if (counter == thread_id && *num_nodes_visited > max_num_nodes - 4)
             {
-              if (*num_nodes_visited > max_num_nodes - 4)
-              {
-                pthread_mutex_lock (&buffer_lock);
-                raise_max_nodes (*num_nodes_visited);
-                pthread_mutex_unlock (&buffer_lock);
-              }
-              output_buffer[*num_nodes_visited].visited = true;
+              lock_buffer_locks();
+              raise_max_nodes (*num_nodes_visited);
+              unlock_buffer_locks();
             }
             *num_nodes_visited += 1;
             counter = (counter + 1) % num_threads;
@@ -2815,15 +2826,11 @@ thread_routine(void *arg){
         
       case FTS_SL:
       case FTS_W:
-        if (counter == thread_id)
+        if (counter == thread_id && *num_nodes_visited > max_num_nodes - 4)
         {
-          if (*num_nodes_visited > max_num_nodes - 4)
-          {
-            pthread_mutex_lock (&buffer_lock);
-            raise_max_nodes (*num_nodes_visited);
-            pthread_mutex_unlock (&buffer_lock);
-          }
-          output_buffer[*num_nodes_visited].visited = true;
+          lock_buffer_locks();
+          raise_max_nodes (*num_nodes_visited);
+          unlock_buffer_locks();
         }
         *num_nodes_visited += 1;
         counter = (counter + 1) % num_threads;
@@ -2834,17 +2841,17 @@ thread_routine(void *arg){
         abort ();
     }
     
-    if (counter == thread_id){
+    if (counter == thread_id)
+    {
       if (*num_nodes_visited > max_num_nodes - 4)
       {
-        pthread_mutex_lock (&buffer_lock);
+        lock_buffer_locks();
         raise_max_nodes (*num_nodes_visited);
-        pthread_mutex_unlock (&buffer_lock);
+        unlock_buffer_locks();
       }
       status_array[thread_id] &=
       grepfile_mthread (fts_global_array[thread_id]->fts_cwd_fd, ent->fts_accpath, follow,
                         thread_routine_arg_array[thread_id].command_line_local, thread_id);
-      output_buffer[*num_nodes_visited].visited = true;
     }
     *num_nodes_visited += 1;
     counter = (counter + 1) % num_threads;
@@ -2944,18 +2951,16 @@ static bool grepdesc_traversal_mthread (int desc, bool command_line){
   output_buffer = (struct output_buffer_node *)
   malloc (initial_num_nodes * sizeof (struct output_buffer_node));
   max_num_nodes = initial_num_nodes;
+  buffer_lock = (pthread_mutex_t *) malloc (num_threads * sizeof (pthread_mutex_t));
   for (int i=0; i<initial_num_nodes; ++i)
   {
-    output_buffer[i].visited = false;
-    output_buffer[i].end = output_buffer[i].content = (char *) malloc (initial_buffstring_length * sizeof(char));
-    output_buffer[i].max_length = initial_buffstring_length;
+    output_buffer[i].max_length = 0;
     output_buffer[i].actual_length = 0;
   }
   
-  pthread_mutex_init (&buffer_lock, NULL);
-  
   for(int i=0; i<num_threads; ++i)
   {
+    pthread_mutex_init (buffer_lock + i, NULL);
     initialize_grep_info (grep_info_array+i);
     fts_global_array[i] = fts_open (fts_arg, opts, NULL);
     if (!fts_global_array[i])
@@ -2992,6 +2997,7 @@ static bool grepdesc_traversal_mthread (int desc, bool command_line){
   free (grep_info_array);
   free (thread_routine_arg_array);
   free (output_buffer);
+  free (buffer_lock);
   
   /* FIXME: fix these two if clauses for multithreading */
   //        if (errno)
@@ -3155,6 +3161,8 @@ grepdesc_mthread (int desc, bool command_line, intmax_t thread_id)
   bool status = true;
   struct stat st;
   int num_nodes_visited = thread_routine_arg_array[thread_id].num_nodes_visited;
+  pthread_mutex_t *local_buffer_lock = buffer_lock + thread_id;
+  
   /* Get the file status, possibly for the second time.  This catches
    a race condition if the directory entry changes after the
    directory entry is read and before the file is opened.  For
@@ -3223,7 +3231,7 @@ grepdesc_mthread (int desc, bool command_line, intmax_t thread_id)
   
   if (count_matches)
   {
-    pthread_mutex_lock (&buffer_lock);
+    pthread_mutex_lock (local_buffer_lock);
     if (grep_info_array[thread_id].out_file)
     {
       print_filename_in_thread (grep_info_array[thread_id].filename, num_nodes_visited);
@@ -3232,21 +3240,27 @@ grepdesc_mthread (int desc, bool command_line, intmax_t thread_id)
       else
         putc_errno_mthread(num_nodes_visited, 0);
     }
-    printf_errno ("%" PRIdMAX "\n", count);
+    int count_length = 4, count_temp = count;
+    while (count_temp != 0)
+    {
+      ++count_length;
+      count_temp /= 10;
+    }
+    printf_errno_mthread (num_nodes_visited, count_length, "%" PRIdMAX "\n", count);
     if (line_buffered)
       fflush_errno ();
-    pthread_mutex_unlock (&buffer_lock);
+    pthread_mutex_unlock (local_buffer_lock);
   }
   
   status = !count;
   if (list_files == (status ? LISTFILES_NONMATCHING : LISTFILES_MATCHING))
   {
-    pthread_mutex_lock (&buffer_lock);
+    pthread_mutex_lock (local_buffer_lock);
     print_filename_in_thread (grep_info_array[thread_id].filename, num_nodes_visited);
     putc_errno_mthread (num_nodes_visited, '\n' & filename_mask);
     if (line_buffered)
       fflush_errno ();
-    pthread_mutex_unlock (&buffer_lock);
+    pthread_mutex_unlock (local_buffer_lock);
   }
   
 closeout:
