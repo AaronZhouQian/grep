@@ -3064,16 +3064,6 @@ static bool grepdesc_traversal_mthread (int desc, bool command_line){
     pthread_join (threads[i], NULL);
   }
   
-  bool already_omitted_leading_group_separator;
-  /* add one more for the newline character */
-  int num_chars_to_omit = strlen (group_separator) + 1;
-  if ((0 <= out_before || 0 <= out_after) && group_separator)
-  {
-    already_omitted_leading_group_separator = false;
-  }
-  else
-    already_omitted_leading_group_separator = true;
-  
   while (recur)
   {
     int num_nodes_visited = thread_routine_arg_array[0].num_nodes_visited;
@@ -3082,14 +3072,7 @@ static bool grepdesc_traversal_mthread (int desc, bool command_line){
       int length = output_buffer[i].actual_length;
       if (length > 0)
       {
-        char *content = output_buffer[i].content;
-        if (!already_omitted_leading_group_separator)
-        {
-          already_omitted_leading_group_separator = true;
-          content += num_chars_to_omit;
-          length -= num_chars_to_omit;
-        }
-        fwrite (content, 1, length, stdout);
+        fwrite (output_buffer[i].content, 1, length, stdout);
         free (output_buffer[i].content);
         output_buffer[i].max_length = output_buffer[i].actual_length = 0;
       }
@@ -3111,14 +3094,7 @@ static bool grepdesc_traversal_mthread (int desc, bool command_line){
     int length = output_buffer[i].actual_length;
     if (length > 0)
     {
-      char *content = output_buffer[i].content;
-      if (!already_omitted_leading_group_separator)
-      {
-        already_omitted_leading_group_separator = true;
-        content += num_chars_to_omit;
-        length -= num_chars_to_omit;
-      }
-      fwrite (content, 1, length, stdout);
+      fwrite (output_buffer[i].content, 1, length, stdout);
       free (output_buffer[i].content);
     }
   }
@@ -4228,6 +4204,11 @@ main (int argc, char **argv)
   {
     if (directories != RECURSE_DIRECTORIES)
       error (EXIT_TROUBLE, 0, _("multithreading has to be used with -r"));
+    if (out_before >= 0 || out_after >= 0)
+    {
+      /* for now we disable context as there could be an extra leading separator */
+      error (EXIT_TROUBLE, 0, _("multithreading doesn't support outputting context"));
+    }
     if (line_buffered)
       error (EXIT_TROUBLE, 0, _("multithreading doesn't support line buffering"));
   }
