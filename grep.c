@@ -391,9 +391,10 @@ struct output_buffer_node
   intmax_t max_length;
   intmax_t actual_length;
 };
+static pthread_mutex_t *buffer_lock;
 
 static struct output_buffer_node *output_buffer;
-static size_t initial_num_nodes = 1024;
+static size_t initial_num_nodes = 32768; /* 2^15 */
 static size_t initial_buffstring_length = 128;
 static size_t current_max_num_nodes;
 /* number of nodes before flushing the buffer */
@@ -410,6 +411,7 @@ putchar_errno (int c)
 static void
 putc_errno_mthread (int num_nodes_visited, int c)
 {
+  pthread_mutex_lock (buffer_lock + num_nodes_visited % num_threads);
   char **content = &output_buffer[num_nodes_visited].content;
   char **end = &output_buffer[num_nodes_visited].end;
   intmax_t *actual_length_addr = &output_buffer[num_nodes_visited].actual_length;
@@ -435,6 +437,7 @@ putc_errno_mthread (int num_nodes_visited, int c)
   /* ignoring the null byte by snprintf*/
   *end += (num_bytes_written < 0 ? 0 : num_bytes_written);
   *actual_length_addr += num_bytes_written;
+  pthread_mutex_unlock (buffer_lock + num_nodes_visited % num_threads);
 }
 
 static void
@@ -447,6 +450,7 @@ fputs_errno (char const *s)
 static void
 fputs_errno_mthread (int num_nodes_visited, char const *s)
 {
+  pthread_mutex_lock (buffer_lock + num_nodes_visited % num_threads);
   char **end = &output_buffer[num_nodes_visited].end;
   char **content = &output_buffer[num_nodes_visited].content;
   size_t size = strlen (s) + 1;
@@ -472,6 +476,7 @@ fputs_errno_mthread (int num_nodes_visited, char const *s)
     stdout_errno = errno;
   *end += (num_bytes_written < 0 ? 0 : num_bytes_written);
   *actual_length_addr += num_bytes_written;
+  pthread_mutex_unlock (buffer_lock + num_nodes_visited % num_threads);
 }
 
 static void _GL_ATTRIBUTE_FORMAT_PRINTF (1, 2)
@@ -487,6 +492,7 @@ printf_errno (char const *format, ...)
 static void _GL_ATTRIBUTE_FORMAT_PRINTF (3, 4)
 printf_errno_mthread (int num_nodes_visited, size_t size, char const *format, ...)
 {
+  pthread_mutex_lock (buffer_lock + num_nodes_visited % num_threads);
   char **end = &output_buffer[num_nodes_visited].end;
   char **content = &output_buffer[num_nodes_visited].content;
   intmax_t *actual_length_addr = &output_buffer[num_nodes_visited].actual_length;
@@ -512,6 +518,7 @@ printf_errno_mthread (int num_nodes_visited, size_t size, char const *format, ..
   *end += (num_bytes_written < 0 ? 0 : num_bytes_written);
   *actual_length_addr += num_bytes_written;
   va_end (ap);
+  pthread_mutex_unlock (buffer_lock + num_nodes_visited % num_threads);
 }
 
 static void
@@ -524,6 +531,7 @@ fwrite_errno (void const *ptr, size_t size, size_t nmemb)
 static void
 fwrite_errno_mthread (void const *ptr, size_t size, size_t nmemb, int num_nodes_visited)
 {
+  pthread_mutex_lock (buffer_lock + num_nodes_visited % num_threads);
   char **end = &output_buffer[num_nodes_visited].end;
   char **content = &output_buffer[num_nodes_visited].content;
   intmax_t *actual_length_addr = &output_buffer[num_nodes_visited].actual_length;
@@ -547,6 +555,7 @@ fwrite_errno_mthread (void const *ptr, size_t size, size_t nmemb, int num_nodes_
   *actual_length_addr += size_to_copy;
   if (*end == NULL)
     stdout_errno = errno;
+  pthread_mutex_unlock (buffer_lock + num_nodes_visited % num_threads);
 }
 
 static void
@@ -729,7 +738,6 @@ struct thread_routine_arg
 
 static bool *status_array;  /* return status for each thread */
 static pthread_t *threads;
-static pthread_mutex_t *buffer_lock;
 static struct thread_routine_arg *thread_routine_arg_array;
 static struct grep_info *grep_info_array;
 
@@ -2458,7 +2466,7 @@ grep_mthread (int fd, struct stat const *st, struct grep_info *info)
   bool out_quiet_0 = info->out_quiet;
   intmax_t thread_id = info->thread_id;
   int num_nodes_visited = thread_routine_arg_array[thread_id].num_nodes_visited;
-  pthread_mutex_t *local_buffer_lock = buffer_lock + thread_id;
+  // DELETE THIS pthread_mutex_t *local_buffer_lock = buffer_lock + thread_id;
   
   /* The value of NLINES when nulls were first deduced in the input;
    this is not necessarily the same as the number of matching lines
@@ -2530,12 +2538,12 @@ grep_mthread (int fd, struct stat const *st, struct grep_info *info)
     
     if (beg < lim)
     {
-      pthread_mutex_lock (local_buffer_lock);
+      // DELETE THIS pthread_mutex_lock (local_buffer_lock);
       if (info->outleft)
         nlines += grepbuf_mthread (beg, lim, info);
       if (info->pending)
         prpending_mthread (lim, info);
-      pthread_mutex_unlock (local_buffer_lock);
+      // DELETE THIS pthread_mutex_unlock (local_buffer_lock);
       if ((!info->outleft && !info->pending)
           || (info->done_on_match && MAX (0, nlines_first_null) < nlines))
         goto finish_grep;
@@ -2573,12 +2581,12 @@ grep_mthread (int fd, struct stat const *st, struct grep_info *info)
   if (residue)
   {
     *(info->buflim)++ = eol;
-    pthread_mutex_lock (local_buffer_lock);
+    // DELETE THIS pthread_mutex_lock (local_buffer_lock);
     if (info->outleft)
       nlines += grepbuf_mthread (info->bufbeg + save - residue, info->buflim, info);
     if (info->pending)
       prpending_mthread (info->buflim, info);
-    pthread_mutex_unlock (local_buffer_lock);
+    // DELETE THIS pthread_mutex_unlock (local_buffer_lock);
   }
   
 finish_grep:
@@ -2587,14 +2595,14 @@ finish_grep:
   if (!info->out_quiet && (info->encoding_error_output
                            || (0 <= nlines_first_null && nlines_first_null < nlines)))
   {
-    pthread_mutex_lock (local_buffer_lock);
+    // DELETE THIS pthread_mutex_lock (local_buffer_lock);
     printf_errno_mthread (num_nodes_visited, strlen (info->filename) + 30 ,_("Binary file %s matches\n"), info->filename);
     /*
      we never use line buffering with -r
      if (line_buffered)
      fflush_errno ();
      */
-    pthread_mutex_unlock (local_buffer_lock);
+    // DELETE THIS pthread_mutex_unlock (local_buffer_lock);
   }
   
   return nlines;
@@ -3228,7 +3236,7 @@ grepdesc_mthread (int desc, bool command_line, intmax_t thread_id)
   bool status = true;
   struct stat st;
   int num_nodes_visited = thread_routine_arg_array[thread_id].num_nodes_visited;
-  pthread_mutex_t *local_buffer_lock = buffer_lock + thread_id;
+  // DELETE THIS pthread_mutex_t *local_buffer_lock = buffer_lock + thread_id;
   
   /* Get the file status, possibly for the second time.  This catches
    a race condition if the directory entry changes after the
@@ -3298,7 +3306,7 @@ grepdesc_mthread (int desc, bool command_line, intmax_t thread_id)
   
   if (count_matches)
   {
-    pthread_mutex_lock (local_buffer_lock);
+    // DELETE THIS pthread_mutex_lock (local_buffer_lock);
     if (grep_info_array[thread_id].out_file)
     {
       print_filename_in_thread (grep_info_array[thread_id].filename, num_nodes_visited);
@@ -3316,18 +3324,18 @@ grepdesc_mthread (int desc, bool command_line, intmax_t thread_id)
     printf_errno_mthread (num_nodes_visited, count_length, "%" PRIdMAX "\n", count);
     if (line_buffered)
       fflush_errno ();
-    pthread_mutex_unlock (local_buffer_lock);
+    // DELETE THIS pthread_mutex_unlock (local_buffer_lock);
   }
   
   status = !count;
   if (list_files == (status ? LISTFILES_NONMATCHING : LISTFILES_MATCHING))
   {
-    pthread_mutex_lock (local_buffer_lock);
+    // DELETE THIS pthread_mutex_lock (local_buffer_lock);
     print_filename_in_thread (grep_info_array[thread_id].filename, num_nodes_visited);
     putc_errno_mthread (num_nodes_visited, '\n' & filename_mask);
     if (line_buffered)
       fflush_errno ();
-    pthread_mutex_unlock (local_buffer_lock);
+    // DELETE THIS pthread_mutex_unlock (local_buffer_lock);
   }
   
 closeout:
@@ -4028,7 +4036,7 @@ main (int argc, char **argv)
     case 'p':
       parallel = true;
       num_threads = (intmax_t) strtol (optarg, NULL, 10);
-      max_allowed_num_nodes = 1024 * num_threads;
+      max_allowed_num_nodes = 1048576 * num_threads;  /* 2^20 * num_threads */
       if(num_threads<1)
         error (EXIT_TROUBLE, 0, _("number of threads has to be positive"));
       break;
