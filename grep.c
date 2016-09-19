@@ -310,18 +310,21 @@ static const char *sgr_start = "\33[%sm\33[K";
 static const char *sgr_end   = "\33[m\33[K";
 
 /* SGR utility functions.  */
+
 static void
 pr_sgr_start (char const *s)
 {
   if (*s)
     print_start_colorize (sgr_start, s);
 }
+
 static void
 pr_sgr_end (char const *s)
 {
   if (*s)
     print_end_colorize (sgr_end);
 }
+
 static void
 pr_sgr_start_if (char const *s)
 {
@@ -478,6 +481,52 @@ fputs_errno_mthread (int num_nodes_visited, char const *s)
   *actual_length_addr += num_bytes_written;
   pthread_mutex_unlock (buffer_lock + (num_nodes_visited % num_threads));
 }
+///* Just for printing the group_separator in multithreading */
+//static void
+//fputs_group_separator_mthread (int num_nodes_visited, char const *s)
+//{
+//  static bool first_time = true;
+//  static int smallest_num_nodes;
+//  if (first_time)
+//  {
+//    smallest_num_nodes = num_nodes_visited;
+//    first_time = false;
+//    return;
+//  }
+//  if (!on_recurrence && num_nodes_visited < smallest_num_nodes)
+//  {
+//    smallest_num_nodes ^= num_nodes_visited;
+//    num_nodes_visited ^= smallest_num_nodes;
+//    smallest_num_nodes ^= num_nodes_visited;
+//  }
+//  pthread_mutex_lock (buffer_lock + (num_nodes_visited % num_threads));
+//  char **end = &output_buffer[num_nodes_visited].end;
+//  char **content = &output_buffer[num_nodes_visited].content;
+//  size_t size = strlen (s) + 1;
+//  intmax_t *actual_length_addr = &output_buffer[num_nodes_visited].actual_length;
+//  intmax_t *max_length_addr = &output_buffer[num_nodes_visited].max_length;
+//  intmax_t original_max_length = *max_length_addr;
+//  if (original_max_length - *actual_length_addr < size + 4)
+//  {
+//    if (original_max_length == 0)
+//    {
+//      *end =
+//      *content = (char *) malloc (initial_buffstring_length * sizeof(char));
+//      *max_length_addr = initial_buffstring_length;
+//    }
+//    *max_length_addr += size + 4;
+//    *max_length_addr *= 2;
+//    *content = (char *) realloc (*content, *max_length_addr * sizeof (char));
+//    *end = *content + *actual_length_addr;
+//  }
+//
+//  int num_bytes_written;
+//  if ((num_bytes_written = snprintf (*end, size, "%s", s)) < 0)
+//    stdout_errno = errno;
+//  *end += (num_bytes_written < 0 ? 0 : num_bytes_written);
+//  *actual_length_addr += num_bytes_written;
+//  pthread_mutex_unlock (buffer_lock + (num_nodes_visited % num_threads));
+//}
 
 static void _GL_ATTRIBUTE_FORMAT_PRINTF (1, 2)
 printf_errno (char const *format, ...)
@@ -573,6 +622,37 @@ fflush_errno (void)
  stdout_errno = errno;
  }
  */
+
+/* Multithreading version */
+static void
+pr_sgr_start_mthread (char const *s, int num_nodes_visited)
+{
+  if (*s)
+  {
+    printf_errno_mthread (num_nodes_visited,
+                          strlen (sgr_start) + strlen (s) + 5, sgr_start, s);
+  }
+}
+/* Multithreading version */
+static void
+pr_sgr_end_mthread (char const *s, int num_nodes_visited)
+{
+  if (*s)
+    fputs_errno_mthread (num_nodes_visited, sgr_end);
+}
+
+static void
+pr_sgr_start_if_mthread (char const *s, int num_nodes_visited)
+{
+  if (color_option)
+    pr_sgr_start_mthread (s, num_nodes_visited);
+}
+static void
+pr_sgr_end_if_mthread (char const *s, int num_nodes_visited)
+{
+  if (color_option)
+    pr_sgr_end_mthread (s, num_nodes_visited);
+}
 
 static struct exclude *excluded_patterns[2];
 static struct exclude *excluded_directory_patterns[2];
@@ -1504,9 +1584,9 @@ print_filename (void)
 static void
 print_filename_in_thread (char const *fname, int num_nodes_visited)
 {
-  pr_sgr_start_if (filename_color);
+  pr_sgr_start_if_mthread (filename_color, num_nodes_visited);
   fputs_errno_mthread(num_nodes_visited, fname);
-  pr_sgr_end_if (filename_color);
+  pr_sgr_end_if_mthread (filename_color, num_nodes_visited);
 }
 
 
@@ -1522,9 +1602,9 @@ print_sep (char sep)
 static void
 print_sep_mthread (char sep, int num_nodes_visited)
 {
-  pr_sgr_start_if (sep_color);
+  pr_sgr_start_if_mthread (sep_color, num_nodes_visited);
   putc_errno_mthread (num_nodes_visited, sep);
-  pr_sgr_end_if (sep_color);
+  pr_sgr_end_if_mthread (sep_color, num_nodes_visited);
 }
 
 /* Print a line number or a byte offset.  */
@@ -1575,9 +1655,9 @@ print_offset_mthread (uintmax_t pos, int min_width, const char *color, int num_n
     while (--min_width >= 0)
       *--p = ' ';
   
-  pr_sgr_start_if (color);
+  pr_sgr_start_if_mthread (color, num_nodes_visited);
   fwrite_errno_mthread (p, 1, buf + sizeof buf - p, num_nodes_visited);
-  pr_sgr_end_if (color);
+  pr_sgr_end_if_mthread (color, num_nodes_visited);
 }
 
 /* Print a whole line head (filename, line, byte).  The output data
@@ -1837,7 +1917,7 @@ print_line_middle_mthread (char *beg, char *lim,
       }
       else
       {
-        pr_sgr_start (line_color);
+        pr_sgr_start_mthread (line_color, num_nodes_visited);
         if (mid)
         {
           cur = mid;
@@ -1846,9 +1926,9 @@ print_line_middle_mthread (char *beg, char *lim,
         fwrite_errno_mthread (cur, 1, b - cur, num_nodes_visited);
       }
       
-      pr_sgr_start_if (match_color);
+      pr_sgr_start_if_mthread (match_color, num_nodes_visited);
       fwrite_errno_mthread (b, 1, match_size, num_nodes_visited);
-      pr_sgr_end_if (match_color);
+      pr_sgr_end_if_mthread (match_color, num_nodes_visited);
       if (only_matching)
         putc_errno_mthread (num_nodes_visited, eolbyte);
     }
@@ -1895,10 +1975,10 @@ print_line_tail_mthread (char *beg, const char *lim, const char *line_color, str
   
   if (tail_size > 0)
   {
-    pr_sgr_start (line_color);
+    pr_sgr_start_mthread (line_color, num_nodes_visited);
     fwrite_errno_mthread (beg, 1, tail_size, num_nodes_visited);
     beg += tail_size;
-    pr_sgr_end (line_color);
+    pr_sgr_end_mthread (line_color, num_nodes_visited);
   }
   
   return beg;
@@ -2156,9 +2236,9 @@ prtext_mthread (char *beg, char *lim, struct grep_info *info)
      the previous output in the file.  */
     if ((0 <= out_before || 0 <= out_after) && p != info->lastout && group_separator)
     {
-      pr_sgr_start_if (sep_color);
+      pr_sgr_start_if_mthread (sep_color, num_nodes_visited);
       fputs_errno_mthread (num_nodes_visited, group_separator);
-      pr_sgr_end_if (sep_color);
+      pr_sgr_end_if_mthread (sep_color, num_nodes_visited);
       putc_errno_mthread (num_nodes_visited, '\n');
     }
     
