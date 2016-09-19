@@ -82,7 +82,8 @@ static bool only_matching;
 static bool align_tabs;
 
 /* Use multithreading on the file granularity */
-static bool parallel;
+static bool parallel = false;
+static bool parallel_explicitly_specified = false;
 int num_threads;
 
 /* See below */
@@ -4070,7 +4071,7 @@ main (int argc, char **argv)
       break;
       
     case 'p':
-      parallel = true;
+      parallel_explicitly_specified = parallel = true;
       num_threads = (int) strtol (optarg, NULL, 10);
       max_allowed_num_nodes = 33554432 * num_threads - 8; /* 33554432 = 2^25 */
       if (num_threads < 1)
@@ -4088,6 +4089,12 @@ main (int argc, char **argv)
     case 'r':
       directories = RECURSE_DIRECTORIES;
       last_recursive = prev_optind;
+      if (!parallel)
+      {
+        parallel = true;
+        num_threads = sysconf(_SC_NPROCESSORS_ONLN);
+        max_allowed_num_nodes = 33554432 * num_threads - 8; /*33554432 = 2^25*/
+      }
       break;
       
     case 's':
@@ -4200,17 +4207,22 @@ main (int argc, char **argv)
       
   }
   
-  if (parallel)
+  if (parallel_explicitly_specified)
   {
     if (directories != RECURSE_DIRECTORIES)
       error (EXIT_TROUBLE, 0, _("multithreading has to be used with -r"));
-    if (out_before >= 0 || out_after >= 0)
+    if (out_before >= 0 || out_after >= 0 || default_context >= 0)
     {
       /* for now we disable context as there could be an extra leading separator */
       error (EXIT_TROUBLE, 0, _("multithreading doesn't support outputting context"));
     }
     if (line_buffered)
       error (EXIT_TROUBLE, 0, _("multithreading doesn't support line buffering"));
+  }
+  else if (parallel)
+  {
+    if (line_buffered || out_before >= 0 || out_after >= 0 || default_context >= 0)
+      parallel = false;
   }
   
   if (show_version)
