@@ -411,7 +411,7 @@ putchar_errno (int c)
 static void
 putc_errno_mthread (int num_nodes_visited, int c)
 {
-  pthread_mutex_lock (buffer_lock + num_nodes_visited % num_threads);
+  pthread_mutex_lock (buffer_lock + (num_nodes_visited % num_threads));
   char **content = &output_buffer[num_nodes_visited].content;
   char **end = &output_buffer[num_nodes_visited].end;
   intmax_t *actual_length_addr = &output_buffer[num_nodes_visited].actual_length;
@@ -437,7 +437,7 @@ putc_errno_mthread (int num_nodes_visited, int c)
   /* ignoring the null byte by snprintf*/
   *end += (num_bytes_written < 0 ? 0 : num_bytes_written);
   *actual_length_addr += num_bytes_written;
-  pthread_mutex_unlock (buffer_lock + num_nodes_visited % num_threads);
+  pthread_mutex_unlock (buffer_lock + (num_nodes_visited % num_threads));
 }
 
 static void
@@ -450,7 +450,7 @@ fputs_errno (char const *s)
 static void
 fputs_errno_mthread (int num_nodes_visited, char const *s)
 {
-  pthread_mutex_lock (buffer_lock + num_nodes_visited % num_threads);
+  pthread_mutex_lock (buffer_lock + (num_nodes_visited % num_threads));
   char **end = &output_buffer[num_nodes_visited].end;
   char **content = &output_buffer[num_nodes_visited].content;
   size_t size = strlen (s) + 1;
@@ -476,7 +476,7 @@ fputs_errno_mthread (int num_nodes_visited, char const *s)
     stdout_errno = errno;
   *end += (num_bytes_written < 0 ? 0 : num_bytes_written);
   *actual_length_addr += num_bytes_written;
-  pthread_mutex_unlock (buffer_lock + num_nodes_visited % num_threads);
+  pthread_mutex_unlock (buffer_lock + (num_nodes_visited % num_threads));
 }
 
 static void _GL_ATTRIBUTE_FORMAT_PRINTF (1, 2)
@@ -492,7 +492,7 @@ printf_errno (char const *format, ...)
 static void _GL_ATTRIBUTE_FORMAT_PRINTF (3, 4)
 printf_errno_mthread (int num_nodes_visited, size_t size, char const *format, ...)
 {
-  pthread_mutex_lock (buffer_lock + num_nodes_visited % num_threads);
+  pthread_mutex_lock (buffer_lock + (num_nodes_visited % num_threads));
   char **end = &output_buffer[num_nodes_visited].end;
   char **content = &output_buffer[num_nodes_visited].content;
   intmax_t *actual_length_addr = &output_buffer[num_nodes_visited].actual_length;
@@ -518,7 +518,7 @@ printf_errno_mthread (int num_nodes_visited, size_t size, char const *format, ..
   *end += (num_bytes_written < 0 ? 0 : num_bytes_written);
   *actual_length_addr += num_bytes_written;
   va_end (ap);
-  pthread_mutex_unlock (buffer_lock + num_nodes_visited % num_threads);
+  pthread_mutex_unlock (buffer_lock + (num_nodes_visited % num_threads));
 }
 
 static void
@@ -531,7 +531,7 @@ fwrite_errno (void const *ptr, size_t size, size_t nmemb)
 static void
 fwrite_errno_mthread (void const *ptr, size_t size, size_t nmemb, int num_nodes_visited)
 {
-  pthread_mutex_lock (buffer_lock + num_nodes_visited % num_threads);
+  pthread_mutex_lock (buffer_lock + (num_nodes_visited % num_threads));
   char **end = &output_buffer[num_nodes_visited].end;
   char **content = &output_buffer[num_nodes_visited].content;
   intmax_t *actual_length_addr = &output_buffer[num_nodes_visited].actual_length;
@@ -555,7 +555,7 @@ fwrite_errno_mthread (void const *ptr, size_t size, size_t nmemb, int num_nodes_
   *actual_length_addr += size_to_copy;
   if (*end == NULL)
     stdout_errno = errno;
-  pthread_mutex_unlock (buffer_lock + num_nodes_visited % num_threads);
+  pthread_mutex_unlock (buffer_lock + (num_nodes_visited % num_threads));
 }
 
 static void
@@ -2134,7 +2134,6 @@ prtext (char *beg, char *lim)
 static void
 prtext_mthread (char *beg, char *lim, struct grep_info *info)
 {
-  static bool used;	/* Avoid printing SEP_STR_GROUP before any output.  */
   char eol = eolbyte;
   int num_nodes_visited = thread_routine_arg_array[info->thread_id].num_nodes_visited;
   if (!info->out_quiet && info->pending > 0)
@@ -2155,8 +2154,7 @@ prtext_mthread (char *beg, char *lim, struct grep_info *info)
     
     /* Print the group separator unless the output is adjacent to
      the previous output in the file.  */
-    if ((0 <= out_before || 0 <= out_after) && used
-        && p != info->lastout && group_separator)
+    if ((0 <= out_before || 0 <= out_after) && p != info->lastout && group_separator)
     {
       pr_sgr_start_if (sep_color);
       fputs_errno_mthread (num_nodes_visited, group_separator);
@@ -2197,7 +2195,6 @@ prtext_mthread (char *beg, char *lim, struct grep_info *info)
   
   info->after_last_match = info->bufoffset - (info->buflim - p);
   info->pending = info->out_quiet ? 0 : MAX (0, out_after);
-  used = true;
   info->outleft -= n;
 }
 
@@ -3002,7 +2999,6 @@ static bool grepdesc_traversal_mthread (int desc, bool command_line){
     output_buffer[i].max_length = 0;
     output_buffer[i].actual_length = 0;
   }
-  
   for(int i=0; i<num_threads; ++i)
   {
     pthread_mutex_init (buffer_lock + i, NULL);
@@ -3011,7 +3007,8 @@ static bool grepdesc_traversal_mthread (int desc, bool command_line){
     if (!fts_global_array[i])
       xalloc_die ();
   }
-  for (intmax_t i=0; i<num_threads; ++i){
+  for (intmax_t i=0; i<num_threads; ++i)
+  {
     status_array[i] = true;
     thread_routine_arg_array[i].command_line_local = true;
     thread_routine_arg_array[i].no_filenames = no_filenames;
@@ -4036,7 +4033,7 @@ main (int argc, char **argv)
     case 'p':
       parallel = true;
       num_threads = (intmax_t) strtol (optarg, NULL, 10);
-      max_allowed_num_nodes = 1048576 * num_threads;  /* 2^20 * num_threads */
+      max_allowed_num_nodes = 1048576 * num_threads - 8;  /* 2^20 * num_threads */
       if(num_threads<1)
         error (EXIT_TROUBLE, 0, _("number of threads has to be positive"));
       break;
