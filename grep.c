@@ -27,7 +27,7 @@
 #include <stdarg.h>
 #include <stdio.h>
 #include <pthread.h>
-#include "src/system.h"
+#include "system.h"
 
 #include "argmatch.h"
 #include "c-ctype.h"
@@ -39,9 +39,9 @@
 #include "fcntl-safer.h"
 #include "fts_.h"
 #include "getopt.h"
+#include "getprogname.h"
 #include "grep.h"
 #include "intprops.h"
-#include "progname.h"
 #include "propername.h"
 #include "quote.h"
 #include "safe-read.h"
@@ -311,21 +311,18 @@ static const char *sgr_start = "\33[%sm\33[K";
 static const char *sgr_end   = "\33[m\33[K";
 
 /* SGR utility functions.  */
-
 static void
 pr_sgr_start (char const *s)
 {
   if (*s)
     print_start_colorize (sgr_start, s);
 }
-
 static void
 pr_sgr_end (char const *s)
 {
   if (*s)
     print_end_colorize (sgr_end);
 }
-
 static void
 pr_sgr_start_if (char const *s)
 {
@@ -396,6 +393,7 @@ struct output_buffer_node
   intmax_t actual_length;
 };
 static pthread_mutex_t *buffer_lock;
+static pthread_mutex_t execute_lock;
 
 static struct output_buffer_node *output_buffer;
 static size_t initial_num_nodes = 32768; /* 2^15 */
@@ -1633,17 +1631,16 @@ print_offset_mthread (uintmax_t pos, int min_width, const char *color, int num_n
 static bool
 print_line_head (char *beg, size_t len, char const *lim, char sep)
 {
-  bool encoding_errors = false;
   if (binary_files != TEXT_BINARY_FILES)
   {
     char ch = beg[len];
-    encoding_errors = buf_has_encoding_errors (beg, len);
+    bool encoding_errors = buf_has_encoding_errors (beg, len);
     beg[len] = ch;
-  }
-  if (encoding_errors)
-  {
-    encoding_error_output = done_on_match = out_quiet = true;
-    return false;
+    if (encoding_errors)
+    {
+      encoding_error_output = true;
+      return false;
+    }
   }
   
   bool pending_sep = false;
@@ -1845,12 +1842,15 @@ print_line_middle_mthread (char *beg, char *lim,
   char *mid = NULL;
   char *b;
   
-  for (cur = beg;
-       (cur < lim
-        && ((match_offset = execute (beg, lim - beg, &match_size, cur))
-            != (size_t) -1));
-       cur = b + match_size)
+  cur = beg;
+  while (cur < lim)
   {
+    pthread_mutex_lock (&execute_lock);
+    match_offset = execute (beg, lim - beg, &match_size, cur);
+    pthread_mutex_unlock (&execute_lock);
+    if (match_offset == (size_t) -1)
+      break;
+    
     b = beg + match_offset;
     
     /* Avoid matching the empty line at the end of the buffer. */
@@ -1893,6 +1893,7 @@ print_line_middle_mthread (char *beg, char *lim,
       if (only_matching)
         putc_errno_mthread (num_nodes_visited, eolbyte);
     }
+    cur = b + match_size;
   }
   
   if (only_matching)
@@ -2093,11 +2094,13 @@ prpending_mthread (char const *lim, struct grep_info *info)
     char *nl = memchr (info->lastout, eolbyte, lim - info->lastout);
     size_t match_size;
     --(info->pending);
-    if (info->outleft
-        || ((execute (info->lastout, nl + 1 - info->lastout,
-                      &match_size, NULL) == (size_t) -1)
-            == !out_invert))
+    pthread_mutex_lock (&execute_lock);
+    bool temp = execute (info->lastout, nl + 1 - info->lastout, &match_size, NULL) == (size_t) -1;
+    pthread_mutex_unlock (&execute_lock);
+    if (info->outleft || (temp == !out_invert))
+    {
       prline_mthread (info->lastout, nl + 1, SEP_CHAR_REJECTED, info);
+    }
     else
       info->pending = 0;
   }
@@ -2314,7 +2317,9 @@ grepbuf_mthread (char *beg, char const *lim, struct grep_info *info)
   for (char *p = beg; p < lim; p = endp)
   {
     size_t match_size;
+    pthread_mutex_lock (&execute_lock);
     size_t match_offset = execute (p, lim - p, &match_size, NULL);
+    pthread_mutex_unlock (&execute_lock);
     if (match_offset == (size_t) -1)
     {
       if (!out_invert)
@@ -3040,6 +3045,7 @@ static bool grepdesc_traversal_mthread (int desc, bool command_line){
     output_buffer[i].max_length = 0;
     output_buffer[i].actual_length = 0;
   }
+  pthread_mutex_init (&execute_lock, NULL);
   for(int i=0; i<num_threads; ++i)
   {
     pthread_mutex_init (buffer_lock + i, NULL);
@@ -3137,17 +3143,16 @@ grepdesc (int desc, bool command_line)
   }
   
   if (desc != STDIN_FILENO && skip_devices (command_line)
-      && is_device_mode (st.st_mode)){
+      && is_device_mode (st.st_mode))
     goto closeout;
-  }
   
   if (desc != STDIN_FILENO && command_line
-      && skipped_file (filename, true, S_ISDIR (st.st_mode) != 0)){
+      && skipped_file (filename, true, S_ISDIR (st.st_mode) != 0))
     goto closeout;
-  }
   
   if (desc != STDIN_FILENO
-      && directories == RECURSE_DIRECTORIES && S_ISDIR (st.st_mode)){
+      && directories == RECURSE_DIRECTORIES && S_ISDIR (st.st_mode))
+  {
     if (parallel) return grepdesc_traversal_mthread (desc, command_line);
     else
     {
@@ -3403,19 +3408,19 @@ usage (int status)
   if (status != 0)
   {
     fprintf (stderr, _("Usage: %s [OPTION]... PATTERN [FILE]...\n"),
-             program_name);
+             getprogname());
     fprintf (stderr, _("Try '%s --help' for more information.\n"),
-             program_name);
+             getprogname());
   }
   else
   {
-    printf (_("Usage: %s [OPTION]... PATTERN [FILE]...\n"), program_name);
+    printf (_("Usage: %s [OPTION]... PATTERN [FILE]...\n"), getprogname());
     printf (_("Search for PATTERN in each FILE or standard input.\n"));
     printf (_("PATTERN is, by default, a basic regular expression (BRE).\n"));
     printf (_("\
               Example: %s -i 'hello world' menu.h main.c\n\
               \n\
-              Regexp selection and interpretation:\n"), program_name);
+              Regexp selection and interpretation:\n"), getprogname());
     printf (_("\
               -E, --extended-regexp     PATTERN is an extended regular expression (ERE)\n\
               -F, --fixed-strings       PATTERN is a set of newline-separated strings\n\
@@ -3864,8 +3869,6 @@ main (int argc, char **argv)
   FILE *fp;
   exit_failure = EXIT_TROUBLE;
   initialize_main (&argc, &argv);
-  set_program_name (argv[0]);
-  program_name = argv[0];
   
   keys = NULL;
   keycc = 0;
@@ -4092,7 +4095,7 @@ main (int argc, char **argv)
       if (!parallel)
       {
         parallel = true;
-        num_threads = sysconf(_SC_NPROCESSORS_ONLN);
+        num_threads = sysconf (_SC_NPROCESSORS_ONLN);
         max_allowed_num_nodes = 33554432 * num_threads - 8; /*33554432 = 2^25*/
       }
       break;
@@ -4227,7 +4230,7 @@ main (int argc, char **argv)
   
   if (show_version)
   {
-    version_etc (stdout, program_name, PACKAGE_NAME, VERSION, AUTHORS,
+    version_etc (stdout, getprogname(), PACKAGE_NAME, VERSION, AUTHORS,
                  (char *) NULL);
     return EXIT_SUCCESS;
   }
@@ -4331,7 +4334,6 @@ main (int argc, char **argv)
   size_t match_size;
   skip_empty_lines = ((execute (eolbytes + 1, 1, &match_size, NULL) == 0)
                       == out_invert);
-  
   if ((argc - optind > 1 && !no_filenames) || with_filenames)
     out_file = 1;
   
@@ -4355,8 +4357,7 @@ main (int argc, char **argv)
     abort ();
   pagesize = psize;
   bufalloc = ALIGN_TO (INITIAL_BUFSIZE, pagesize) + pagesize + sizeof (uword);
-  if  (!parallel)
-    buffer = xmalloc (bufalloc);
+  buffer = xmalloc (bufalloc);
   
   if (fts_options & FTS_LOGICAL && devices == READ_COMMAND_LINE_DEVICES)
     devices = READ_DEVICES;
@@ -4379,9 +4380,8 @@ main (int argc, char **argv)
   }
   
   bool status = true;
-  do{
+  do
     status &= grep_command_line_arg (*files++);
-  }
   while (*files != NULL);
   
   /* We register via atexit() to test stdout.  */
