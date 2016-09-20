@@ -4074,12 +4074,17 @@ main (int argc, char **argv)
       break;
       
     case 'p':
+    {
       parallel_explicitly_specified = parallel = true;
+      int max_num_threads = sysconf (_SC_NPROCESSORS_ONLN) * 6;
       num_threads = (int) strtol (optarg, NULL, 10);
+      if (num_threads > max_num_threads)
+        num_threads = max_num_threads;
       max_allowed_num_nodes = 33554432 * num_threads - 8; /* 33554432 = 2^25 */
       if (num_threads < 1)
         error (EXIT_TROUBLE, 0, _("number of threads has to be positive"));
       break;
+    }
       
     case 'q':
       exit_on_match = true;
