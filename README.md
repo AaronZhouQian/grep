@@ -1,3 +1,3 @@
 Under src/
 
-Currently just replace the original grep.c and dosbuff.c with the corresponding two files here.
+Replace the original grep.c dosbuff.c dfasearch.c search.h with the corresponding two files here.
