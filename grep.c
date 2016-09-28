@@ -393,7 +393,6 @@ struct output_buffer_node
   intmax_t actual_length;
 };
 static pthread_mutex_t *buffer_lock;
-static pthread_mutex_t execute_lock;
 
 static struct output_buffer_node *output_buffer;
 static size_t initial_num_nodes = 32768; /* 2^15 */
@@ -742,6 +741,7 @@ struct grep_info
   bool skip_nuls;     /* to be initialized inside the grep function call */
   bool encoding_error_output;
   bool seek_data_failed;
+  bool skip_empty_lines;
   int out_file;
   int thread_id;
   int bufdesc;
@@ -1845,9 +1845,14 @@ print_line_middle_mthread (char *beg, char *lim,
   cur = beg;
   while (cur < lim)
   {
-    pthread_mutex_lock (&execute_lock);
-    match_offset = execute (beg, lim - beg, &match_size, cur);
-    pthread_mutex_unlock (&execute_lock);
+    if (execute == EGexecute)
+    {
+      match_offset = EGexecute_mthread (beg, lim - beg, &match_size, cur, info->thread_id);
+    }
+    else
+    {
+      match_offset = execute (beg, lim - beg, &match_size, cur);
+    }
     if (match_offset == (size_t) -1)
       break;
     
@@ -2094,9 +2099,15 @@ prpending_mthread (char const *lim, struct grep_info *info)
     char *nl = memchr (info->lastout, eolbyte, lim - info->lastout);
     size_t match_size;
     --(info->pending);
-    pthread_mutex_lock (&execute_lock);
-    bool temp = execute (info->lastout, nl + 1 - info->lastout, &match_size, NULL) == (size_t) -1;
-    pthread_mutex_unlock (&execute_lock);
+    bool temp;
+    if (execute == EGexecute)
+    {
+      temp = EGexecute_mthread (info->lastout, nl + 1 - info->lastout, &match_size, NULL, info->thread_id) == (size_t) -1;
+    }
+    else
+    {
+      temp = execute (info->lastout, nl + 1 - info->lastout, &match_size, NULL) == (size_t) -1;
+    }
     if (info->outleft || (temp == !out_invert))
     {
       prline_mthread (info->lastout, nl + 1, SEP_CHAR_REJECTED, info);
@@ -2317,9 +2328,16 @@ grepbuf_mthread (char *beg, char const *lim, struct grep_info *info)
   for (char *p = beg; p < lim; p = endp)
   {
     size_t match_size;
-    pthread_mutex_lock (&execute_lock);
-    size_t match_offset = execute (p, lim - p, &match_size, NULL);
-    pthread_mutex_unlock (&execute_lock);
+    size_t match_offset;
+    if (execute == EGexecute)
+    {
+      match_offset = EGexecute_mthread (p, lim - p, &match_size, NULL, info->thread_id);
+    }
+    else
+    {
+      match_offset = execute (p, lim - p, &match_size, NULL);
+    }
+    
     if (match_offset == (size_t) -1)
     {
       if (!out_invert)
@@ -2526,7 +2544,7 @@ grep_mthread (int fd, struct stat const *st, struct grep_info *info)
   info -> outleft = max_count;
   info -> after_last_match = 0;
   info -> pending = 0;
-  info -> skip_nuls = skip_empty_lines && !eol;
+  info -> skip_nuls = info->skip_empty_lines && !eol;
   info -> encoding_error_output = false;
   info -> seek_data_failed = false;
   
@@ -2551,7 +2569,7 @@ grep_mthread (int fd, struct stat const *st, struct grep_info *info)
         info->done_on_match = info->out_quiet = true;
       nlines_first_null = nlines;
       nul_zapper = eol;
-      info->skip_nuls = skip_empty_lines;
+      info->skip_nuls = info->skip_empty_lines;
     }
     
     info->lastnl = info->bufbeg;
@@ -3036,7 +3054,7 @@ static bool grepdesc_traversal_mthread (int desc, bool command_line){
   status_array = (bool *) malloc (num_threads * sizeof (bool));
   threads = (pthread_t *) malloc (num_threads * sizeof (pthread_t));
   thread_routine_arg_array = (struct thread_routine_arg *) malloc (num_threads * sizeof (struct thread_routine_arg));
-  grep_info_array = (struct grep_info *) malloc (num_threads * sizeof (struct grep_info));
+  
   output_buffer = (struct output_buffer_node *) malloc (initial_num_nodes * sizeof (struct output_buffer_node));
   current_max_num_nodes = initial_num_nodes;
   buffer_lock = (pthread_mutex_t *) malloc (num_threads * sizeof (pthread_mutex_t));
@@ -3045,7 +3063,6 @@ static bool grepdesc_traversal_mthread (int desc, bool command_line){
     output_buffer[i].max_length = 0;
     output_buffer[i].actual_length = 0;
   }
-  pthread_mutex_init (&execute_lock, NULL);
   for(int i=0; i<num_threads; ++i)
   {
     pthread_mutex_init (buffer_lock + i, NULL);
@@ -3558,7 +3575,8 @@ static struct matcher const matchers[] = {
   { "perl",      Pcompile,  Pexecute },
   { "", NULL, NULL },
 };
-
+static reg_syntax_t syntax_bits;
+static bool no_syntax_bits = false;
 /* Set the matcher to M if available.  Exit in case of conflicts or if
  M is not available.  */
 static void
@@ -3570,14 +3588,27 @@ setmatcher (char const *m)
     error (EXIT_TROUBLE, 0, _("conflicting matchers specified"));
   
   for (p = matchers; p->compile; p++)
+  {
     if (STREQ (m, p->name))
     {
       matcher = p->name;
       compile = p->compile;
       execute = p->execute;
+      if (compile == Gcompile)
+        syntax_bits = RE_SYNTAX_GREP;
+      else if (compile == Ecompile)
+        syntax_bits = RE_SYNTAX_EGREP;
+      else if (compile == Acompile)
+        syntax_bits = RE_SYNTAX_AWK;
+      else if (compile == GAcompile)
+        syntax_bits = RE_SYNTAX_GNU_AWK;
+      else if (compile == PAcompile)
+        syntax_bits = RE_SYNTAX_POSIX_AWK;
+      else
+        no_syntax_bits = true;
       return;
     }
-  
+  }
   error (EXIT_TROUBLE, 0, _("invalid matcher %s"), m);
 }
 
@@ -3908,6 +3939,7 @@ main (int argc, char **argv)
   compile = matchers[0].compile;
   execute = matchers[0].execute;
   
+  bool exclude_include = false;
   while (prev_optind = optind,
          (opt = get_nondigit_option (argc, argv, &default_context)) != -1)
     switch (opt)
@@ -4161,6 +4193,7 @@ main (int argc, char **argv)
       
     case EXCLUDE_OPTION:
     case INCLUDE_OPTION:
+      exclude_include = true;
       for (int cmd = 0; cmd < 2; cmd++)
       {
         if (!excluded_patterns[cmd])
@@ -4171,6 +4204,7 @@ main (int argc, char **argv)
       }
       break;
     case EXCLUDE_FROM_OPTION:
+      exclude_include = true;
       for (int cmd = 0; cmd < 2; cmd++)
       {
         if (!excluded_patterns[cmd])
@@ -4183,6 +4217,7 @@ main (int argc, char **argv)
       break;
       
     case EXCLUDE_DIRECTORY_OPTION:
+      exclude_include = true;
       strip_trailing_slashes (optarg);
       for (int cmd = 0; cmd < 2; cmd++)
       {
@@ -4226,10 +4261,14 @@ main (int argc, char **argv)
     }
     if (line_buffered)
       error (EXIT_TROUBLE, 0, _("multithreading doesn't support line buffering"));
+    if (exclude_include)
+      error (EXIT_TROUBLE, 0, _("multithreading doesn't support include/exclude options"));
+    if (match_words)
+      error (EXIT_TROUBLE, 0, _("multithreading doesn't support the match words options"));
   }
   else if (parallel)
   {
-    if (line_buffered || out_before >= 0 || out_after >= 0 || default_context >= 0)
+    if (match_words || exclude_include || line_buffered || out_before >= 0 || out_after >= 0 || default_context >= 0)
       parallel = false;
   }
   
@@ -4331,14 +4370,44 @@ main (int argc, char **argv)
     compile = Gcompile;
     execute = EGexecute;
   }
-  
-  compile (keys, keycc);
+  if (parallel && !no_syntax_bits)
+  {
+    compile (keys, keycc);
+    initialize_search_info_array (num_threads);
+    for (int i = 0; i < num_threads; ++i)
+    {
+      GEAcompile_mthread (keys, keycc, syntax_bits,i);
+    }
+  }
+  else
+  {
+    compile (keys, keycc);
+  }
   free (keys);
+  if (parallel)
+  {
+    grep_info_array = (struct grep_info *) malloc (num_threads * sizeof (struct grep_info));
+  }
   /* We need one byte prior and one after.  */
   char eolbytes[3] = { 0, eolbyte, 0 };
   size_t match_size;
-  skip_empty_lines = ((execute (eolbytes + 1, 1, &match_size, NULL) == 0)
-                      == out_invert);
+  if (parallel && execute == EGexecute)
+  {
+    for (int i = 0; i < num_threads; ++i)
+      grep_info_array[i].skip_empty_lines = ((EGexecute_mthread (eolbytes + 1, 1, &match_size, NULL, i) == 0)
+                                             == out_invert);
+  }
+  else if (parallel)
+  {
+    for (int i = 0; i < num_threads; ++i)
+      grep_info_array[i].skip_empty_lines = ((execute (eolbytes + 1, 1, &match_size, NULL) == 0)
+                                             == out_invert);
+  }
+  else
+  {
+    skip_empty_lines = ((execute (eolbytes + 1, 1, &match_size, NULL) == 0)
+                        == out_invert);
+  }
   if ((argc - optind > 1 && !no_filenames) || with_filenames)
     out_file = 1;
   
