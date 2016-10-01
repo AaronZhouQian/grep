@@ -55,6 +55,12 @@ initialize_search_info_array (int n)
   }
 }
 
+void
+free_search_info_array (void)
+{
+  free (search_info_array);
+}
+
 /* Whether -w considers WC to be a word constituent.  */
 static bool
 wordchar (wint_t wc)

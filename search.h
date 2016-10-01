@@ -59,6 +59,7 @@ extern void GEAcompile_mthread (char const *, size_t, reg_syntax_t, int thread_i
 extern size_t EGexecute (char *, size_t, size_t *, char const *);
 extern size_t EGexecute_mthread (char *, size_t, size_t *, char const *, int thread_id);
 extern void initialize_search_info_array (int);
+extern void free_search_info_array (void);
 
 /* kwsearch.c */
 extern void Fcompile (char const *, size_t);
