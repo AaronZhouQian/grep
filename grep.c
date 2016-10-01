@@ -3032,6 +3032,7 @@ void initialize_grep_info(struct grep_info *info){
   info -> bufalloc         = bufalloc;
   info -> pagesize         = pagesize;
   info -> buffer           = xmalloc (bufalloc);
+  info -> skip_empty_lines = skip_empty_lines;
 }
 
 /* Used for multithreading recursive grep */
@@ -3054,7 +3055,7 @@ static bool grepdesc_traversal_mthread (int desc, bool command_line){
   status_array = (bool *) malloc (num_threads * sizeof (bool));
   threads = (pthread_t *) malloc (num_threads * sizeof (pthread_t));
   thread_routine_arg_array = (struct thread_routine_arg *) malloc (num_threads * sizeof (struct thread_routine_arg));
-  
+  grep_info_array = (struct grep_info *) malloc (num_threads * sizeof (struct grep_info));
   output_buffer = (struct output_buffer_node *) malloc (initial_num_nodes * sizeof (struct output_buffer_node));
   current_max_num_nodes = initial_num_nodes;
   buffer_lock = (pthread_mutex_t *) malloc (num_threads * sizeof (pthread_mutex_t));
@@ -4384,24 +4385,21 @@ main (int argc, char **argv)
     compile (keys, keycc);
   }
   free (keys);
-  if (parallel)
-  {
-    grep_info_array = (struct grep_info *) malloc (num_threads * sizeof (struct grep_info));
-  }
+  
   /* We need one byte prior and one after.  */
   char eolbytes[3] = { 0, eolbyte, 0 };
   size_t match_size;
   if (parallel && execute == EGexecute)
   {
     for (int i = 0; i < num_threads; ++i)
-      grep_info_array[i].skip_empty_lines = ((EGexecute_mthread (eolbytes + 1, 1, &match_size, NULL, i) == 0)
-                                             == out_invert);
+      skip_empty_lines = ((EGexecute_mthread (eolbytes + 1, 1, &match_size, NULL, i) == 0)
+                          == out_invert);
   }
   else if (parallel)
   {
     for (int i = 0; i < num_threads; ++i)
-      grep_info_array[i].skip_empty_lines = ((execute (eolbytes + 1, 1, &match_size, NULL) == 0)
-                                             == out_invert);
+      skip_empty_lines = ((execute (eolbytes + 1, 1, &match_size, NULL) == 0)
+                          == out_invert);
   }
   else
   {
