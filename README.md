@@ -9,6 +9,7 @@ Under src/ replace the original grep.c dosbuff.c dfasearch.c search.h Makefile.a
 Then,
 
 cd ..
+
 ./bootstrap
 ./configure
 make
