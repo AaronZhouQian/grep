@@ -6,8 +6,6 @@ cd grep/src/
 
 Under src/ replace the original grep.c dosbuff.c dfasearch.c search.h with the corresponding five files here.
 
-( Note that in the following ./configure step, you might need to do ./configure -pthread )
-
 Then,
 
 cd ..
