@@ -11,7 +11,9 @@ Then,
 cd ..
 
 ./bootstrap
+
 ./configure
+
 make
 
 Multithreaded grep at the file granularity when used with the option -r or -R on directories.
