@@ -4,7 +4,7 @@ replace bootstrap.conf with the bootstrap.conf here
 
 cd grep/src/
 
-Under src/ replace the original grep.c dosbuff.c dfasearch.c search.h with the corresponding five files here.
+Under src/ replace the original grep.c dosbuff.c dfasearch.c search.h Makefile.am with the corresponding five files here.
 
 Then,
 
