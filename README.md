@@ -1,8 +1,10 @@
 git clone git://git.savannah.gnu.org/grep.git
 
+replace bootstrap.conf with the bootstrap.conf here
+
 cd grep/src/
 
-Under src/ replace the original grep.c dosbuff.c dfasearch.c search.h with the corresponding four files here.
+Under src/ replace the original grep.c dosbuff.c dfasearch.c search.h with the corresponding five files here.
 
 ( Note that in the following ./configure step, you might need to do ./configure -pthread )
 
